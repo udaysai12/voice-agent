@@ -6,9 +6,9 @@ import numpy as np
 def denoise_audio(audio, sample_rate=16000):
     """
     Robust pure-NumPy audio denoiser for noisy environments:
-    1. FFT Bandpass filter (85 Hz to 7500 Hz): removes mic rumble, AC 50/60Hz hum, desk thumps, fan noise, and high hiss.
-    2. Adaptive Noise Gate: estimates background noise floor from bottom 20% frame energies and attenuates noise in silent/pause gaps.
-    3. Speech-Aware Dynamic Range Normalization: peak normalizes speech without boosting low noise floor.
+    1. FFT Bandpass filter (75 Hz to 7600 Hz): removes mic rumble, AC 50/60Hz hum, desk thumps, fan noise, and high hiss.
+    2. Adaptive Overlap-Add Noise Gate: estimates background noise floor from bottom 25% energy frames and softly attenuates silent/pause gaps.
+    3. Speech-Aware Dynamic Range Normalization: normalizes speech without boosting low ambient noise floor.
     """
     if audio is None or len(audio) == 0:
         return audio
@@ -18,17 +18,83 @@ def denoise_audio(audio, sample_rate=16000):
     if n < 320:  # less than 20ms
         return arr
 
-    # 1. FFT Highpass filter (>= 70 Hz): removes mic rumble, AC hum, and DC drift
+    # 1. FFT Bandpass filter (75 Hz to 7600 Hz) with smooth cosine transitions
     freqs = np.fft.rfftfreq(n, 1.0 / sample_rate)
     fft = np.fft.rfft(arr)
-    highpass = (freqs >= 70)
-    fft[~highpass] *= 0.05
-    filtered = np.fft.irfft(fft, n=n)
 
-    # 2. Dynamic Range Normalization: peak normalize so Whisper receives clear acoustic signal
-    max_amp = np.max(np.abs(filtered))
-    if max_amp > 0.01:
-        filtered = (filtered / max_amp) * 0.95
+    bandpass = np.ones(len(freqs), dtype=np.float32)
+    # Low cutoff (70-110 Hz)
+    low_stop, low_pass = 70.0, 110.0
+    low_idx_stop = int(np.searchsorted(freqs, low_stop))
+    low_idx_pass = int(np.searchsorted(freqs, low_pass))
+    if low_idx_pass > low_idx_stop:
+        bandpass[:low_idx_stop] = 0.02
+        ramp = 0.5 * (1.0 - np.cos(np.pi * np.linspace(0, 1, low_idx_pass - low_idx_stop)))
+        bandpass[low_idx_stop:low_idx_pass] = 0.02 + 0.98 * ramp
+
+    # High cutoff (7200-7800 Hz)
+    high_pass, high_stop = 7200.0, 7800.0
+    high_idx_pass = int(np.searchsorted(freqs, high_pass))
+    high_idx_stop = int(np.searchsorted(freqs, high_stop))
+    if high_idx_stop > high_idx_pass:
+        ramp = 0.5 * (1.0 + np.cos(np.pi * np.linspace(0, 1, high_idx_stop - high_idx_pass)))
+        bandpass[high_idx_pass:high_idx_stop] = 0.02 + 0.98 * ramp
+        bandpass[high_idx_stop:] = 0.02
+
+    filtered = np.fft.irfft(fft * bandpass, n=n).astype(np.float32)
+
+    # 2. Smooth Adaptive Noise Gate on 20ms frames (hop 10ms)
+    frame_len = 320
+    hop = 160
+    if n > frame_len * 2:
+        num_frames = 1 + (n - frame_len) // hop
+        frame_energies = []
+        for i in range(num_frames):
+            chunk = filtered[i * hop : i * hop + frame_len]
+            rms = np.sqrt(np.mean(chunk**2) + 1e-12)
+            frame_energies.append(rms)
+        frame_energies = np.array(frame_energies, dtype=np.float32)
+
+        # Noise floor estimated from bottom 25% energy frames
+        noise_floor = float(np.percentile(frame_energies, 25))
+        speech_thresh = max(noise_floor * 2.2, 0.008)
+        silence_thresh = max(noise_floor * 1.3, 0.003)
+
+        gains = np.ones(num_frames, dtype=np.float32)
+        for i in range(num_frames):
+            e = frame_energies[i]
+            if e <= silence_thresh:
+                gains[i] = 0.15  # Soft attenuation of noise floor
+            elif e >= speech_thresh:
+                gains[i] = 1.0   # Preserve speech fully
+            else:
+                alpha = (e - silence_thresh) / (speech_thresh - silence_thresh + 1e-9)
+                gains[i] = 0.15 + 0.85 * (0.5 * (1.0 - np.cos(np.pi * alpha)))
+
+        # Overlap-add windowed gains smoothly over the signal
+        gain_envelope = np.ones(n, dtype=np.float32)
+        weight_sum = np.zeros(n, dtype=np.float32)
+        window = np.hanning(frame_len).astype(np.float32)
+        for i in range(num_frames):
+            start = i * hop
+            end = start + frame_len
+            gain_envelope[start:end] += gains[i] * window
+            weight_sum[start:end] += window
+        valid = weight_sum > 1e-6
+        gain_envelope[valid] /= weight_sum[valid]
+        filtered *= gain_envelope
+
+    # 3. Speech-Aware Dynamic Range Normalization (Controlled Gain)
+    speech_mask = np.abs(filtered) > 0.015
+    if np.any(speech_mask):
+        speech_rms = np.sqrt(np.mean(filtered[speech_mask]**2))
+        target_rms = 0.10
+        if speech_rms > 0.001:
+            gain = np.clip(target_rms / speech_rms, 0.5, 3.5)
+            filtered = filtered * gain
+            peak = np.max(np.abs(filtered))
+            if peak > 0.95:
+                filtered = (filtered / peak) * 0.95
 
     return filtered.astype(np.float32)
 
@@ -555,8 +621,8 @@ def is_skip(text):
         'nahi hai', 'nahi ji', 'kuch nahi hai', 'mere paas nahi hai', 'koi code nahi hai', 'pata nahi',
         'नहीं', 'नहीं है', 'ना', 'कुछ नहीं', 'कोई कोड नहीं', 'स्किप', 'अगला', 'नहीं जी', 'नहीं चाहिए', 'पता नहीं', 'बाद में',
         # Telugu
-        'vaddu', 'vaddhu', 'ledu', 'emi ledu', 'skip chey', 'skip cheyyandi', 'taruvatha', 'code ledu',
-        'oddu', 'akkarledu', 'avashyam ledu', 'ledu andi', 'vaddu andi', 'teliyadu',
+        'vaddu', 'vaddhu', 'ledu', 'emi ledu', 'em ledu', 'em ledhu', 'emi ledhu', 'skip chey', 'skip cheyyi', 'skip cheyyandi', 'skip cheseyandi', 'skip andi', 'taruvatha', 'code ledu',
+        'oddu', 'oddhu', 'vaddandi', 'ledandi', 'akkarledu', 'avsaram ledu', 'avsaram ledhu', 'avashyam ledu', 'ledu andi', 'vaddu andi', 'teliyadu', 'ippudu ledu', 'ippudu vaddu', 'naaku ledu', 'daggara ledu', 'pass',
         'వద్దు', 'లేదు', 'ఏం లేదు', 'ఏమీ లేదు', 'కోడ్ లేదు', 'వద్దండి', 'స్కిప్', 'తరువాత',
         'లేదండి', 'లేదు అండి', 'వద్దు అండి', 'వద్దండి', 'కోడ్ లేదు అండి', 'నా దగ్గర లేదు', 'తెలియదు', 'నాకు తెలియదు', 'వద్దులే'
     }
@@ -1077,12 +1143,12 @@ def detect_language_choice(text):
     t = text.lower().strip()
 
     # 1. Primary check: Explicit language names in any sentence
-    if "english" in t or "angrezi" in t or "inglish" in t:
-        return "en"
-    if "hindi" in t or "हिंदी" in t or "हिन्दी" in t or "hindhi" in t:
-        return "hi"
-    if "telugu" in t or "తెలుగు" in t or "telgu" in t:
+    if "tenglish" in t or "tanglish" in t or "తెంగ్లీష్" in t or "telugu" in t or "తెలుగు" in t or "telgu" in t:
         return "te"
+    if re.search(r"\b(english|angrezi|inglish)\b", t):
+        return "en"
+    if re.search(r"\b(hindi|hindhi)\b", t) or "हिंदी" in t or "हिन्दी" in t:
+        return "hi"
 
     clean_t = re.sub(r"[^\w\s\u0900-\u097F\u0C00-\u0C7F]", " ", t)
     tokens = clean_t.split()
@@ -1109,7 +1175,7 @@ def detect_language_choice(text):
         close_hi = difflib.get_close_matches(tokens[0], ["hindi", "hindhi"], n=1, cutoff=0.7)
         if close_hi:
             return "hi"
-        close_te = difflib.get_close_matches(tokens[0], ["telugu", "telgu"], n=1, cutoff=0.7)
+        close_te = difflib.get_close_matches(tokens[0], ["telugu", "telgu", "tenglish", "tanglish"], n=1, cutoff=0.7)
         if close_te:
             return "te"
 

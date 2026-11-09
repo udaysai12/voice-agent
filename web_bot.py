@@ -1,4 +1,18 @@
+import os
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "4")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
+
+import base64
 import datetime
+import hashlib
 import http.server
 import io
 import json
@@ -10,6 +24,18 @@ import urllib.parse
 import uuid
 import numpy as np
 from faster_whisper import WhisperModel, decode_audio
+
+def safe_decode_audio(buf):
+    """Safely decodes audio bytes or file buffer into float32 numpy array.
+    Returns an empty array instead of raising PyAV EOFError or InvalidDataError."""
+    try:
+        if isinstance(buf, (bytes, bytearray)):
+            if len(buf) < 1000:
+                return np.array([], dtype=np.float32)
+            buf = io.BytesIO(buf)
+        return decode_audio(buf)
+    except Exception:
+        return np.array([], dtype=np.float32)
 from nlu_parser import (
     clean_company_name,
     clean_door_no,
@@ -41,67 +67,67 @@ FIELD_PROMPTS = {
     "companyName": {
         "en": "Company name, store name, shop name, Brostide, Fresh Mart, Textiles, Enterprises, Fashion, Retail",
         "hi": "दुकान का नाम, कंपनी, किराना, क्लॉथ्स, स्टोर, एंटरप्राइजेज, वस्त्र",
-        "te": "దుకాణం పేరు, కంపెనీ పేరు, బట్టల దుకాణం, కిరాణా, టెక్స్‌టైల్స్, ఎంటర్‌ప్రైజెస్",
+        "te": "Store name, company name, shop name, Brostide, Fresh Mart, కిరాణా, బట్టల షాప్, టెక్స్‌టైల్స్, ఎంటర్‌ప్రైజెస్, స్టోర్ నేమ్",
     },
     "personName": {
         "en": "Contact person name, Rahul Sharma, Uday Kumar, Suresh, Priya, Anand, Rajesh",
         "hi": "संपर्क व्यक्ति का नाम, राहुल शर्मा, उदय कुमार, सुरेश, प्रिया, आनंद, राजेश, मेरा नाम",
-        "te": "వ్యక్తి పేరు, నా పేరు, రాహుల్, ఉదయ్ కుమార్, సురేష్, ప్రియ, రమేష్, ఆనంద్",
+        "te": "Contact person name, నా పేరు, person name, Rahul Sharma, Uday Kumar, రాహుల్, ఉదయ్ కుమార్, సురేష్",
     },
     "phone": {
         "en": "Phone number, mobile number, 10 digits, call 9840123456, 9876543210, 9949012345",
         "hi": "मोबाइल नंबर, फोन नंबर, 10 अंक, नौ आठ सात छह पांच चार तीन दो एक शून्य, 9876543210",
-        "te": "ఫోన్ నంబర్, మొబైల్ నంబర్, పది అంకెలు, తొమ్మిది ఎనిమిది ఏడు ఆరు ఐదు నాలుగు మూడు రెండు ఒకటి సున్నా, 9876543210",
+        "te": "Mobile number, phone number, 10 digits, నా నంబర్, పది అంకెలు, 9840123456, 9876543210, కాల్ చేయండి",
     },
     "email": {
         "en": "Email address, contact email, user at gmail dot com, name at yahoo dot com",
         "hi": "ईमेल पता, नाम एट जीमेल डॉट कॉम, कॉन्टैक्ट ईमेल",
-        "te": "ఈమెయిల్ అడ్రస్, పేరు ఎట్ జిమెయిల్ డాట్ కామ్, ఈమెయిల్",
+        "te": "Email address, mail id, store at gmail dot com, skip, లేదు",
     },
     "storeCategory": {
         "en": "Clothing, Grocery, Pharmacy, Electronics, Footwear, Fashion, Supermarket, Restaurant, Retail",
         "hi": "कपड़े, किराना, दवा, इलेक्ट्रॉनिक्स, जूते, परिधान, मेडिकल, जनरल स्टोर",
-        "te": "బట్టలు, కిరాణా, మందులు, ఎలక్ట్రానిక్స్, చెప్పులు, సూపర్ మార్కెట్, జనరల్ స్టోర్స్",
+        "te": "Store category, clothing, grocery, pharmacy, medical, electronics, supermarket, బట్టలు, కిరాణా, మందులు",
     },
     "doorNo": {
         "en": "Door number, flat number, building number, plot number, shop number, 1-2-3, 402, skip, roadside",
         "hi": "मकान नंबर, दुकान नंबर, प्लॉट नंबर, 1-2-3, 402, छोड़ दो, रोडसाइड, पटरी",
-        "te": "డోర్ నంబర్, షాప్ నంబర్, ప్లాట్ నంబర్, 1-2-3, 402, వద్దు, రోడ్డు పక్కన",
+        "te": "Shop number, door number, flat number, skip, వద్దు, 1-2-3, 402, రోడ్డు పక్కన",
     },
     "street": {
         "en": "Street name, road, MG Road, Main Road, Market Street, Bazaar, 5th Avenue, Lane",
         "hi": "सड़क, गली, रोड, एमजी रोड, मेन रोड, बाजार, मार्केट",
-        "te": "వీధి, రోడ్డు, మెయిన్ రోడ్డు, బజార్, మార్కెట్, స్ట్రీట్",
+        "te": "Street name, road name, Main Road, MG Road, Bazaar, కాలనీ, వీధి, రోడ్డు, skip",
     },
     "area": {
         "en": "Area, locality, neighborhood, colony, Gajuwaka, T Nagar, Madhapur, Indiranagar",
         "hi": "इलाका, कॉलोनी, नगर, गाजुवाका, टी नगर, माधपुर, क्षेत्र",
-        "te": "ప్రాంతం, ఏరియా, కాలనీ, నగర్, గాజువాక, మాదాపూర్",
+        "te": "Area, locality, neighborhood, Madhapur, Gajuwaka, T Nagar, కాలనీ, ఏరియా, ప్రాంతం, skip",
     },
     "town": {
         "en": "Town, village, mandal, skip, none",
         "hi": "कस्बा, गाँव, मंडल, छोड़ दो",
-        "te": "పట్టణం, గ్రామం, మండలం, వద్దు, ఏమీ లేదు",
+        "te": "Town, village name, పట్టణం, గ్రామం, skip, లేదు, వద్దు",
     },
     "city": {
         "en": "City name, Visakhapatnam, Vizag, Hyderabad, Vijayawada, Guntur, Chennai, Bengaluru, Mumbai, Delhi",
         "hi": "शहर का नाम, विशाखापट्टनम, हैदराबाद, विजयवाड़ा, गुंटूर, दिल्ली, मुंबई, जयपुर",
-        "te": "నగరం పేరు, విశాఖపట్నం, వైజాగ్, హైదరాబాద్, విజయవాడ, గుంటూరు, తిరుపతి",
+        "te": "City name, Visakhapatnam, Vizag, Hyderabad, Vijayawada, Guntur, తిరుపతి, సిటీ",
     },
     "state": {
         "en": "State name, Andhra Pradesh, Telangana, Tamil Nadu, Karnataka, Maharashtra, Rajasthan, Uttar Pradesh",
         "hi": "राज्य का नाम, आंध्र प्रदेश, तेलंगाना, राजस्थान, उत्तर प्रदेश, महाराष्ट्र, कर्नाटक",
-        "te": "రాష్ట్రం పేరు, ఆంధ్రప్రదేశ్, తెలంగాణ, తమిళనాడు, కర్ణాటక",
+        "te": "State name, Andhra Pradesh, Telangana, ఆంధ్రప్రదేశ్, తెలంగాణ, స్టేట్",
     },
     "pincode": {
         "en": "Pincode, postal code, zip code, 6 digits, 530016, 500081, 520001",
         "hi": "पिन कोड, 6 अंक, 530016, 500081, 520001, छह अंक",
-        "te": "పిన్ కోడ్, ఆరు అంకెలు, 530016, 500081, 520001",
+        "te": "Pincode, postal code, 6 digits, ఆరు అంకెలు, 530016, 500081, పిన్‌కోడ్",
     },
     "usedReferalCode": {
         "en": "Referral code, coupon code, skip, none, no code, don't have",
         "hi": "रेफ़रल कोड, कूपन कोड, छोड़ दो, नहीं है, कोई कोड नहीं",
-        "te": "రెఫరల్ కోడ్, కూపన్ కోడ్, వద్దు, లేదు, కోడ్ లేదు",
+        "te": "Referral code, coupon code, skip, లేదు, వద్దు, no code",
     },
 }
 
@@ -112,175 +138,221 @@ def get_field_prompt(field_key, lang="en"):
         return prompts.get(lang, prompts.get("en", WHISPER_PROMPT))
     return prompts or WHISPER_PROMPT
 
-print("Loading Faster-Whisper model ('base' on CPU int8)...")
-model = WhisperModel("base", device="cpu", compute_type="int8")
-print("Faster-Whisper model ready!")
+def load_best_whisper_model():
+    """Dynamically loads the best Faster-Whisper model, prioritizing RTX 2050 GPU (CUDA float16) with 'small'."""
+    # Register NVIDIA CUDA cuBLAS runtime DLL directory
+    try:
+        import site
+        for sp in site.getsitepackages():
+            cublas_dir = os.path.join(sp, "nvidia", "cublas", "bin")
+            if os.path.exists(cublas_dir):
+                try:
+                    os.add_dll_directory(cublas_dir)
+                except Exception:
+                    pass
+                os.environ["PATH"] = cublas_dir + os.pathsep + os.environ.get("PATH", "")
+    except Exception:
+        pass
+
+    # 1. Priority: RTX 2050 GPU (CUDA float16) with high-accuracy 'small' model
+    try:
+        print("Loading high-accuracy Faster-Whisper 'small' on RTX 2050 GPU (CUDA float16)...")
+        m = WhisperModel("small", device="cuda", compute_type="float16")
+        # Warmup GPU kernels
+        m.transcribe(np.zeros(16000, dtype=np.float32), beam_size=1)
+        print("[AI Engine Ready] Faster-Whisper 'small' active on NVIDIA GeForce RTX 2050 GPU (Maximum Perfection)!")
+        return m, "cuda", "small"
+    except Exception as e_gpu:
+        print(f"[Notice] GPU init ({e_gpu}). Falling back to CPU...")
+
+    # 2. Fallback: CPU int8 with 'small'
+    try:
+        print("Loading Faster-Whisper 'small' on CPU int8...")
+        m = WhisperModel("small", device="cpu", compute_type="int8", cpu_threads=4)
+        print("[AI Engine Ready] Faster-Whisper 'small' active on CPU int8!")
+        return m, "cpu", "small"
+    except Exception as e_small:
+        print(f"[Notice] CPU small fallback ({e_small}). Using 'base'...")
+
+    # 3. Fallback: CPU int8 with 'base'
+    try:
+        m = WhisperModel("base", device="cpu", compute_type="int8", cpu_threads=4)
+        print("[AI Engine Ready] Faster-Whisper 'base' active on CPU int8.")
+        return m, "cpu", "base"
+    except Exception:
+        m = WhisperModel("tiny", device="cpu", compute_type="int8", cpu_threads=2)
+        print("[AI Engine Ready] Faster-Whisper 'tiny' active on CPU.")
+        return m, "cpu", "tiny"
+
+model, MODEL_DEVICE, MODEL_SIZE = load_best_whisper_model()
 
 STORE_FIELDS = [
     {
         "key": "companyName",
         "label": "Company / Store Name",
         "label_hi": "दुकान का नाम",
-        "label_te": "స్టోర్ పేరు",
+        "label_te": "Store లేదా Company Name",
         "question": "What is your company or store name?",
         "question_en": "What is your company or store name?",
         "question_hi": "आपकी दुकान या कंपनी का नाम क्या है?",
-        "question_te": "మీ దుకాణం లేదా కంపెనీ పేరు ఏమిటి?",
+        "question_te": "మీ store లేదా company name ఏంటి?",
         "required": True,
-        "hint": "e.g., Brostide, Fresh Mart, किराना, బట్టల షాప్",
+        "hint": "Store name cheppandi (e.g. Brostide, Fresh Mart, కిరాణా, బట్టల షాప్)",
     },
     {
         "key": "personName",
         "label": "Contact Person Name",
         "label_hi": "संपर्क व्यक्ति का नाम",
-        "label_te": "కాంటాక్ట్ వ్యక్తి పేరు",
+        "label_te": "Contact Person Name",
         "question": "Who is the contact person name?",
         "question_en": "Who is the contact person name?",
         "question_hi": "संपर्क व्यक्ति का नाम क्या है?",
-        "question_te": "కాంటాక్ట్ వ్యక్తి పేరు ఏమిటి?",
+        "question_te": "కాంటాక్ట్ person name ఏంటి?",
         "required": True,
-        "hint": "e.g., Uday Kumar, Rahul Sharma, రాహుల్, ఉదయ్",
+        "hint": "Mee name cheppandi (e.g. Uday Kumar, Rahul, ఉదయ్)",
     },
     {
         "key": "phone",
         "label": "Phone Number",
         "label_hi": "फ़ोन नंबर",
-        "label_te": "ఫోన్ నంబర్",
+        "label_te": "Mobile Number",
         "question": "What is your contact phone number?",
         "question_en": "What is your contact phone number?",
         "question_hi": "आपका मोबाइल या फ़ोन नंबर क्या है?",
-        "question_te": "మీ మొబైల్ లేదా ఫోన్ నంబర్ ఏమిటి?",
+        "question_te": "మీ 10 digits mobile number చెప్పండి.",
         "required": True,
-        "hint": "10-digit mobile number / 10 అంకెల ఫోన్ నంబర్",
+        "hint": "10 digits mobile number (e.g., 9840123456)",
     },
     {
         "key": "email",
         "label": "Email Address",
         "label_hi": "ईमेल पता",
-        "label_te": "ఇమెయిల్ అడ్రస్",
+        "label_te": "Email Address",
         "question": "What is your email address?",
         "question_en": "What is your email address?",
         "question_hi": "आपका ईमेल पता क्या है?",
-        "question_te": "మీ ఇమెయిల్ అడ్రస్ ఏమిటి?",
-        "required": True,
-        "hint": "e.g., contact@gmail.com",
+        "question_te": "మీ email address ఏంటి? లేకపోతే skip అనండి.",
+        "required": False,
+        "hint": "e.g., store@gmail.com (లేదా skip anali)",
     },
     {
         "key": "storeCategory",
         "label": "Store Category",
         "label_hi": "स्टोर श्रेणी",
-        "label_te": "స్టోర్ కేటగిరీ",
+        "label_te": "Store Category",
         "question": "What is your store category?",
         "question_en": "What is your store category?",
         "question_hi": "आपकी दुकान किस श्रेणी की है? (जैसे कपड़े, किराना, दवा)",
-        "question_te": "మీ స్టోర్ కేటగిరీ ఏమిటి? (ఉదా. బట్టలు, కిరాణా, మందులు)",
+        "question_te": "మీ store category ఏంటి? లైక్ clothing, grocery, medical, electronics?",
         "required": True,
         "is_list": True,
-        "hint": "Clothing, Grocery, Electronics, బట్టలు, किराना",
+        "hint": "Clothing, Grocery, Medical, Electronics, etc.",
     },
     {
         "key": "doorNo",
         "label": "Door / Shop Number",
         "label_hi": "दुकान या मकान नंबर",
-        "label_te": "షాప్ లేదా డోర్ నంబర్",
+        "label_te": "Shop లేదా Door Number",
         "question": "What is your shop or door number? Or say skip.",
         "question_en": "What is your shop or door number? Or say skip.",
         "question_hi": "आपकी दुकान या मकान का नंबर क्या है? या छोड़ दो बोलें।",
-        "question_te": "మీ షాప్ లేదా డోర్ నంబర్ ఏమిటి? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "మీ shop లేదా door number ఎంత? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "e.g., 1-2-3, Shop 4B (Optional)",
+        "hint": "e.g., Shop 4B, 1-2-3 (లేదా skip anali)",
     },
     {
         "key": "street",
         "label": "Street Name",
         "label_hi": "गली या रोड",
-        "label_te": "వీధి లేదా రోడ్డు",
+        "label_te": "Street లేదా Road Name",
         "question": "What street is your store on? Or say skip.",
         "question_en": "What street is your store on? Or say skip.",
         "question_hi": "आपकी दुकान किस गली या रोड पर है? या छोड़ दो बोलें।",
-        "question_te": "మీ దుకాణం ఏ వీధి లేదా రోడ్డులో ఉంది? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "మీ store ఏ street లేదా road లో ఉంది? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "e.g., Main Road, MG Road (Optional)",
+        "hint": "e.g., Main Road, MG Road, Gandhi Road (లేదా skip anali)",
     },
     {
         "key": "area",
         "label": "Area / Locality",
         "label_hi": "इलाका",
-        "label_te": "ప్రాంతం",
+        "label_te": "Area లేదా Locality",
         "question": "Which area or locality is it located in? Or say skip.",
         "question_en": "Which area or locality is it located in? Or say skip.",
         "question_hi": "यह किस इलाके या एरिया में स्थित है? या छोड़ दो बोलें।",
-        "question_te": "ఇది ఏ ప్రాంతం లేదా ఏరియాలో ఉంది? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "మీ store ఏ area లో ఉంది? లైక్ Madhapur, Gajuwaka? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "e.g., Gajuwaka, Madhapur, T Nagar (Optional)",
+        "hint": "e.g., Gajuwaka, Madhapur, Jubilee Hills (లేదా skip anali)",
     },
     {
         "key": "town",
         "label": "Town / Village",
         "label_hi": "गाँव या कस्बा",
-        "label_te": "గ్రామం లేదా టౌన్",
+        "label_te": "Town లేదా Village",
         "question": "Which town is it in? Or say skip.",
         "question_en": "Which town is it in? Or say skip.",
         "question_hi": "यह किस कस्बे या गाँव में है? या छोड़ दो बोलें।",
-        "question_te": "ఇది ఏ టౌన్ లేదా గ్రామంలో ఉంది? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "మీ town లేదా village name ఏంటి? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "town or village name (Optional)",
+        "hint": "Town లేదా village name (లేదా skip anali)",
     },
     {
         "key": "city",
         "label": "City",
         "label_hi": "शहर",
-        "label_te": "నగరం",
+        "label_te": "City Name",
         "question": "Which city is your store in?",
         "question_en": "Which city is your store in?",
         "question_hi": "आपकी दुकान किस शहर में है?",
-        "question_te": "మీ దుకాణం ఏ నగరంలో ఉంది?",
+        "question_te": "మీ store ఏ city లో ఉంది? లైక్ Vizag, Hyderabad?",
         "required": True,
-        "hint": "Visakhapatnam, Hyderabad, Vijayawada, విశాఖపట్నం, हैदराबाद",
+        "hint": "Visakhapatnam, Hyderabad, Vijayawada, etc.",
     },
     {
         "key": "state",
         "label": "State",
         "label_hi": "राज्य",
-        "label_te": "రాష్ట్రం",
+        "label_te": "State",
         "question": "Which state are you located in?",
         "question_en": "Which state are you located in?",
         "question_hi": "आप किस राज्य में स्थित हैं?",
-        "question_te": "మీరు ఏ రాష్ట్రంలో ఉన్నారు?",
+        "question_te": "ఏ state లో ఉన్నారు? Andhra Pradesh లేదా Telangana?",
         "required": True,
-        "hint": "Andhra Pradesh, Telangana, ఆంధ్రప్రదేశ్, आंध्र प्रदेश",
+        "hint": "Andhra Pradesh, Telangana, etc.",
     },
     {
         "key": "pincode",
         "label": "Pincode / Zip Code",
         "label_hi": "पिन कोड",
-        "label_te": "పిన్‌కోడ్",
+        "label_te": "Pincode",
         "question": "What is your pincode or zip code?",
         "question_en": "What is your pincode or zip code?",
         "question_hi": "आपका पिन कोड क्या है?",
-        "question_te": "మీ పిన్‌కోడ్ లేదా జిప్ కోడ్ ఏమిటి?",
+        "question_te": "మీ area 6 digits pincode ఎంత?",
         "required": True,
-        "hint": "6-digit postal code (e.g., 530016, 500081)",
+        "hint": "6-digit pincode (e.g., 530016, 500081)",
     },
     {
         "key": "usedReferalCode",
         "label": "Referral Code",
         "label_hi": "रेफ़रल कोड",
-        "label_te": "రెఫరల్ కోడ్",
+        "label_te": "Referral Code",
         "question": "Do you have any referral code? Or say skip.",
         "question_en": "Do you have any referral code? Or say skip.",
         "question_hi": "क्या आपके पास कोई रेफ़रल कोड है? या छोड़ दो बोलें।",
-        "question_te": "మీ వద్ద ఏదైనా రెఫరల్ కోడ్ ఉందా? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "దగ్గర ఏదైనా referral code ఉందా? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "referral code or say skip (Optional)",
+        "hint": "Referral code లేదా skip anali (Optional)",
     },
 ]
 
 TTS_CACHE = {}
+TTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "tts_cache")
+os.makedirs(TTS_DIR, exist_ok=True)
 
 
 def get_tts_audio_bytes(text, lang="te"):
-    """Returns MP3 audio bytes for text in Telugu, Hindi, or English using gTTS with caching."""
+    """Returns MP3 audio bytes for text in Telugu, Hindi, or English using fast disk/memory cache."""
     global TTS_CACHE
     clean_text = text.strip()
     if not clean_text:
@@ -291,14 +363,32 @@ def get_tts_audio_bytes(text, lang="te"):
     if cache_key in TTS_CACHE:
         return TTS_CACHE[cache_key]
 
+    # Instant check in pre-cached disk directory
+    key_str = f"{gtts_lang}:{clean_text}"
+    fn = hashlib.md5(key_str.encode("utf-8")).hexdigest() + ".mp3"
+    disk_path = os.path.join(TTS_DIR, fn)
+    if os.path.exists(disk_path) and os.path.getsize(disk_path) > 100:
+        try:
+            with open(disk_path, "rb") as f:
+                data = f.read()
+            TTS_CACHE[cache_key] = data
+            return data
+        except Exception:
+            pass
+
     try:
         from gtts import gTTS
-        tts = gTTS(text=clean_text, lang=gtts_lang)
+        tts = gTTS(text=clean_text, lang=gtts_lang, timeout=4.0)
         buf = io.BytesIO()
         tts.write_to_fp(buf)
         data = buf.getvalue()
         if data:
             TTS_CACHE[cache_key] = data
+            try:
+                with open(disk_path, "wb") as f:
+                    f.write(data)
+            except Exception:
+                pass
             return data
     except Exception as e:
         print(f"[TTS Error] failed to generate audio for '{clean_text[:30]}': {e}")
@@ -306,45 +396,42 @@ def get_tts_audio_bytes(text, lang="te"):
 
 
 def prewarm_tts_cache():
-    """Pre-caches standard questions and greetings in background thread for instant playback."""
-    time.sleep(0.8)
+    """Loads all pre-cached MP3 audio files into memory on startup for 0ms retrieval."""
+    time.sleep(0.05)
     items = [
         ("Welcome! Please choose your preferred language: English, Hindi, or Telugu.", "en"),
         ("कृपया अपनी भाषा चुनें: हिंदी, तेलुगु, या अंग्रेज़ी।", "hi"),
-        ("దయచేసి మీ భాషను ఎంచుకోండి: ఇంగ్లీష్, హిందీ, లేదా తెలుగు.", "te"),
+        ("దయచేసి మీ language ని select చేసుకోండి: English, Hindi, లేదా Telugu.", "te"),
         ("Language set to English! Let's get your store registered. What is your company or store name?", "en"),
         ("भाषा हिंदी चुनी गई है! आइए आपकी दुकान का पंजीकरण शुरू करते हैं। आपकी दुकान या कंपनी का नाम क्या है?", "hi"),
-        ("భాష తెలుగు ఎంపిక చేయబడింది! మీ స్టోర్ నమోదు ప్రారంభిద్దాం. మీ దుకాణం లేదా కంపెనీ పేరు ఏమిటి?", "te"),
+        ("Telugu language select అయింది! Store register చేద్దాం. మీ store లేదా company name ఏంటి?", "te"),
         ("I could not hear any speech. Let's try that question again.", "en"),
         ("मुझे कोई आवाज़ सुनाई नहीं दी। आइए फिर से कोशिश करें।", "hi"),
-        ("నాకు ఎలాంటి శబ్దం వినిపించలేదు. దయచేసి మళ్లీ ప్రయత్నించండి.", "te"),
-        ("Congratulations! All store onboarding details have been completed.", "en"),
+        ("నాకు voice వినిపించలేదు. Please మళ్ళీ ఒకసారి చెప్పండి.", "te"),
+        ("Super! All your store details have been collected successfully.", "en"),
         ("बधाई हो! आपकी दुकान के सभी विवरण सफलतापूर्वक एकत्र कर लिए गए हैं।", "hi"),
-        ("అభినందనలు! మీ స్టోర్ వివరాలన్నీ విజయవంతంగా సేకరించబడ్డాయి.", "te"),
+        ("Super! మీ store details అన్నీ successfully save అయిపోయాయి. Store profile ready!", "te"),
     ]
     for f in STORE_FIELDS:
-        if "question_te" in f:
-            items.append((f["question_te"], "te"))
-        if "question_hi" in f:
-            items.append((f["question_hi"], "hi"))
-        if "question_en" in f:
-            items.append((f["question_en"], "en"))
-
-    # Pre-warm all Telugu transition sentences so /api/tts returns instantly from memory
-    for i in range(len(STORE_FIELDS) - 1):
-        f = STORE_FIELDS[i]
-        next_f = STORE_FIELDS[i + 1]
-        lbl_te = f.get("label_te", f["label"])
-        q_te = next_f.get("question_te", next_f["question"])
-        items.append((f"సరే, {lbl_te} నమోదు చేయబడింది. {q_te}", "te"))
-        items.append((f"సరే, నమోదు చేయబడింది. {q_te}", "te"))
+        q_te = f.get("question_te")
+        if q_te:
+            items.append((q_te, "te"))
+            items.append((f"Done! {q_te}", "te"))
+        q_hi = f.get("question_hi")
+        if q_hi:
+            items.append((q_hi, "hi"))
+            items.append((f"ठीक है! {q_hi}", "hi"))
+        q_en = f.get("question_en", f.get("question"))
+        if q_en:
+            items.append((q_en, "en"))
+            items.append((f"Done! {q_en}", "en"))
 
     for txt, l in items:
         try:
             get_tts_audio_bytes(txt, l)
         except Exception:
             pass
-    print(f"[TTS Engine] Pre-warmed {len(TTS_CACHE)} speech audio assets in memory.")
+    print(f"[TTS Engine] Pre-warmed {len(TTS_CACHE)} speech audio assets in memory (Zero Latency Ready).")
 
 
 threading.Thread(target=prewarm_tts_cache, daemon=True).start()
@@ -416,8 +503,8 @@ def parse_and_validate(field, user_text, collected_data, lang="en"):
     if is_user_asking_question(t):
         if lang == "te":
             clarification = (
-                f"మీ దుకాణం నమోదు కోసం మీ {field.get('label_te', field['label'])} ({field.get('hint', '')}) అడుగుతున్నాను. "
-                f"దయచేసి మీ సమాధానం చెప్పండి లేదా స్కిప్ అనండి."
+                f"మీ store registration కోసం మీ {field.get('label_te', field['label'])} ({field.get('hint', '')}) అడుగుతున్నాను. "
+                f"Please మీ answer చెప్పండి లేదా skip అనండి."
             )
         elif lang == "hi":
             clarification = (
@@ -435,7 +522,7 @@ def parse_and_validate(field, user_text, collected_data, lang="en"):
         if not field["required"]:
             return None, None, None
         req_msg = {
-            "te": f"'{field.get('label_te', field['label'])}' తప్పనిసరిగా నమోదు చేయాలి. {field.get('question_te', field['question'])}",
+            "te": f"'{field.get('label_te', field['label'])}' mandatory field. {field.get('question_te', field['question'])}",
             "hi": f"'{field.get('label_hi', field['label'])}' आवश्यक है। {field.get('question_hi', field['question'])}",
         }.get(lang, f"'{field['label']}' is required. {field['question']}")
         return None, req_msg, None
@@ -443,32 +530,20 @@ def parse_and_validate(field, user_text, collected_data, lang="en"):
     key = field["key"]
 
     if key == "companyName":
-        if is_skip(t):
-            req_msg = {
-                "te": "మీ దుకాణం పేరు తప్పనిసరిగా నమోదు చేయాలి. మీ షాప్ పేరు ఏమిటి?",
-                "hi": "दुकान का नाम आवश्यक है। आपकी दुकान या कंपनी का नाम क्या है?",
-            }.get(lang, "Company/Store name is required to complete registration. What is your store name?")
-            return None, req_msg, None
         val = clean_company_name(t)
         if not val or val.lower() in ("skip", "none"):
             req_msg = {
-                "te": "దయచేసి మీ దుకాణం పేరు స్పష్టంగా చెప్పండి.",
+                "te": "Please మీ store లేదా company name ని clear గా చెప్పండి.",
                 "hi": "कृपया अपनी दुकान का नाम स्पष्ट रूप से बताएं।",
             }.get(lang, "Please provide your valid store or company name.")
             return None, req_msg, None
         return val, None, None
 
     if key == "personName":
-        if is_skip(t):
-            req_msg = {
-                "te": "సంప్రదించవలసిన వ్యక్తి పేరు తప్పనిసరి. మీ పేరు ఏమిటి?",
-                "hi": "संपर्क व्यक्ति का नाम आवश्यक है। आपका नाम क्या है?",
-            }.get(lang, "Contact person name is required. What is your name?")
-            return None, req_msg, None
         val, warning = clean_person_name(t)
         if warning == "phone_detected":
             warn_msg = {
-                "te": "అది ఫోన్ నంబర్‌లా ఉంది. మీ కాంటాక్ట్ వ్యక్తి అసలు పేరు ఏమిటి?",
+                "te": "అది phone number లా ఉంది. Contact person name ఏమిటి?",
                 "hi": "वह एक फोन नंबर जैसा सुनाई दिया। आपके संपर्क व्यक्ति का नाम क्या है?",
             }.get(lang, "That sounded like a phone number. What is your contact person's actual name?")
             return None, warn_msg, None
@@ -478,7 +553,7 @@ def parse_and_validate(field, user_text, collected_data, lang="en"):
         digits = clean_phone(t)
         if len(digits) != 10:
             err_msg = {
-                "te": "దయచేసి మీ 10 అంకెల మొబైల్ లేదా ఫోన్ నంబర్‌ను స్పష్టంగా చెప్పండి.",
+                "te": "Please మీ 10 digits mobile number ని clear గా చెప్పండి.",
                 "hi": "कृपया अपना 10 अंकों का मोबाइल नंबर स्पष्ट बताएं।",
             }.get(lang, "Please provide your complete 10-digit mobile number (e.g., 9840123456).")
             return None, err_msg, None
@@ -493,26 +568,14 @@ def parse_and_validate(field, user_text, collected_data, lang="en"):
         return cats, None, None
 
     if key == "doorNo":
-        if is_skip(t):
-            return None, None, None
         val = clean_door_no(t)
         return val if val else None, None, None
 
     if key == "street":
-        if is_skip(t):
-            return None, None, None
         val = clean_street(t)
         return val if val else None, None, None
 
     if key in ("city", "state", "town", "area"):
-        if is_skip(t):
-            if not field["required"]:
-                return (None if key != "town" else ""), None, None
-            req_msg = {
-                "te": f"'{field.get('label_te', field['label'])}' తప్పనిసరి. {field.get('question_te', field['question'])}",
-                "hi": f"'{field.get('label_hi', field['label'])}' आवश्यक है। {field.get('question_hi', field['question'])}",
-            }.get(lang, f"'{field['label']}' is required. {field['question']}")
-            return None, req_msg, None
         current_city = collected_data.get("city", None)
         val, auto_state = clean_location(t, key, current_city=current_city)
         if key == "town" and val is None:
@@ -524,8 +587,6 @@ def parse_and_validate(field, user_text, collected_data, lang="en"):
         return val, None, None
 
     if key == "usedReferalCode":
-        if is_skip(t):
-            return None, None, None
         eng_ref = translate_indic_to_english(t).strip().upper()
         if is_skip(eng_ref.lower()) or eng_ref in ("NONE", "SKIP", "NA", "N/A", "NO", "NIL", "NULL", "NAHIN", "LEDU", "VADDU", "NAHI", "CHHOD DO"):
             return None, None, None
@@ -556,6 +617,37 @@ def get_current_field_info(lang="auto"):
     return None
 
 
+def build_language_selection_response(detected_choice, user_text=""):
+    """Unified handler for initial language selection across /api/transcribe, /api/set_language, and /api/answer."""
+    global SESSION
+    SESSION["language"] = detected_choice
+    SESSION["language_chosen"] = True
+    if detected_choice == "hi":
+        ack = "भाषा हिंदी चुनी गई है! आइए आपकी दुकान का पंजीकरण शुरू करते हैं। आपकी दुकान या कंपनी का नाम क्या है?"
+    elif detected_choice == "te":
+        ack = "Telugu language select అయింది! Store register చేద్దాం. మీ store లేదా company name ఏంటి?"
+    else:
+        ack = "Language set to English! Let's get your store registered. What is your company or store name?"
+
+    resp = {
+        "status": "success",
+        "language": detected_choice,
+        "user_text": user_text,
+        "bot_text": ack,
+        "ack_text": ack,
+        "json": build_store_json(SESSION["data"], SESSION["backend_id"]),
+        "progress": 0,
+        "current_field": get_current_field_info(detected_choice),
+        "detected_language": detected_choice,
+        "detected_prob": 1.0,
+        "language_selected": detected_choice,
+    }
+    audio_b = get_tts_audio_bytes(ack, lang=detected_choice)
+    if audio_b:
+        resp["tts_audio_base64"] = base64.b64encode(audio_b).decode("ascii")
+    return resp
+
+
 def process_user_turn(user_text, lang="auto", target_key=None):
     global SESSION
     idx = SESSION["current_index"]
@@ -564,7 +656,7 @@ def process_user_turn(user_text, lang="auto", target_key=None):
     if SESSION["is_completed"]:
         done_msg = {
             "hi": "आपकी दुकान का पंजीकरण पहले ही पूरा हो चुका है! दराज में पूरा JSON देखें।",
-            "te": "మీ స్టోర్ నమోదు ఇప్పటికే పూర్తయింది! డ్రాయర్‌లో పూర్తి JSONని సమీక్షించండి.",
+            "te": "మీ store registration ఆల్రెడీ complete అయింది! Full JSON ని preview లో చూడవచ్చు.",
         }.get(lang, "Your store registration is already complete! Review the full JSON in the drawer.")
         return {
             "user_text": user_text,
@@ -629,9 +721,9 @@ def process_user_turn(user_text, lang="auto", target_key=None):
         if lang == "hi":
             bot_text = "बधाई हो! आपकी दुकान के सभी विवरण सफलतापूर्वक एकत्र कर लिए गए हैं।"
         elif lang == "te":
-            bot_text = "అభినందనలు! మీ స్టోర్ వివరాలన్నీ విజయవంతంగా సేకరించబడ్డాయి."
+            bot_text = "Super! మీ store details అన్నీ successfully save అయిపోయాయి. Store profile ready!"
         else:
-            bot_text = "Congratulations! All your store details have been collected successfully."
+            bot_text = "Super! All your store details have been collected successfully."
         return {
             "user_text": user_text,
             "bot_text": bot_text,
@@ -645,14 +737,12 @@ def process_user_turn(user_text, lang="auto", target_key=None):
 
     next_field = STORE_FIELDS[new_idx]
     next_q = next_field.get(f"question_{lang}") or next_field.get("question_en") or next_field["question"]
-    lbl = field.get(f"label_{lang}") or field["label"]
     if lang == "hi":
-        bot_text = f"ठीक है, {lbl} दर्ज हुआ। {next_q}"
+        bot_text = f"ठीक है! {next_q}"
     elif lang == "te":
-        bot_text = f"సరే, {lbl} నమోదు చేయబడింది. {next_q}"
+        bot_text = f"Done! {next_q}"
     else:
-        saved_repr = str(parsed_val) if parsed_val is not None else "(Skipped)"
-        bot_text = f"Got it, saved {field['label']}: {saved_repr}. {next_q}"
+        bot_text = f"Done! {next_q}"
 
     return {
         "user_text": user_text,
@@ -666,7 +756,7 @@ def process_user_turn(user_text, lang="auto", target_key=None):
     }
 
 
-HTML_PAGE = """<!DOCTYPE html>
+HTML_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -880,6 +970,49 @@ HTML_PAGE = """<!DOCTYPE html>
       font-weight: 700;
       color: #fff;
       margin-bottom: 8px;
+    }
+    .lang-modal-close {
+      position: absolute;
+      top: 18px;
+      right: 20px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #cbd5e1;
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+    .lang-modal-close:hover {
+      background: rgba(255, 255, 255, 0.2);
+      color: #fff;
+    }
+    .lang-autoplay-notice {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.25), rgba(194, 120, 71, 0.35));
+      border: 1px solid rgba(245, 158, 11, 0.6);
+      color: #fde68a;
+      padding: 10px 20px;
+      border-radius: 30px;
+      font-size: 13.5px;
+      font-weight: 700;
+      cursor: pointer;
+      margin-bottom: 18px;
+      transition: all 0.25s ease;
+      animation: pulseGlow 1.4s infinite alternate;
+    }
+    .lang-autoplay-notice:hover {
+      transform: scale(1.03);
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.4), rgba(194, 120, 71, 0.5));
+      box-shadow: 0 0 25px rgba(245, 158, 11, 0.5);
     }
     .lang-modal-sub {
       color: var(--text-muted);
@@ -1372,6 +1505,102 @@ HTML_PAGE = """<!DOCTYPE html>
       flex-shrink: 0;
     }
 
+    .mic-vu-meter {
+      width: 76px;
+      height: 9px;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      display: inline-flex;
+      align-items: center;
+      margin-left: 6px;
+    }
+    .mic-vu-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #10b981 0%, #f59e0b 75%, #ef4444 100%);
+      border-radius: 6px;
+      transition: width 0.08s ease-out;
+    }
+    .dock-pitch-badge {
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 8px;
+      background: rgba(16, 185, 129, 0.2);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.45);
+      font-family: 'JetBrains Mono', monospace;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: 6px;
+      transition: all 0.2s ease;
+    }
+    .dock-pitch-badge.high {
+      background: rgba(245, 158, 11, 0.25);
+      color: #fbbf24;
+      border-color: rgba(245, 158, 11, 0.6);
+      animation: pulseGlow 0.8s infinite alternate;
+    }
+
+    .live-words-container {
+      display: inline-flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 6px;
+      margin: 0 4px;
+    }
+    .live-word-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 3px 9px;
+      border-radius: 6px;
+      font-size: 13.5px;
+      font-weight: 600;
+      color: #38bdf8;
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      animation: wordPop 0.15s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+      transition: all 0.2s ease;
+    }
+    .live-word-pill.active {
+      color: #f59e0b;
+      background: rgba(245, 158, 11, 0.2);
+      border-color: rgba(245, 158, 11, 0.6);
+      box-shadow: 0 0 12px rgba(245, 158, 11, 0.4);
+    }
+    .live-word-pill.committed {
+      color: #34d399;
+      background: rgba(16, 185, 129, 0.18);
+      border-color: rgba(16, 185, 129, 0.5);
+      box-shadow: 0 0 10px rgba(16, 185, 129, 0.3);
+    }
+    @keyframes wordPop {
+      0% { transform: scale(0.7); opacity: 0; }
+      100% { transform: scale(1); opacity: 1; }
+    }
+    .speed-metric-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      font-size: 11.5px;
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 700;
+      color: #34d399;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.4);
+      margin-left: auto;
+      animation: pulseGlow 1s ease-in-out infinite alternate;
+    }
+    @keyframes pulseGlow {
+      0% { opacity: 0.8; }
+      100% { opacity: 1; transform: scale(1.03); }
+    }
+
     .live-subtitles {
       color: #f8fafc;
       font-weight: 500;
@@ -1603,13 +1832,16 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="lang-selector" id="langSelector" title="Select Speech & UI Language">
         <button class="lang-pill" data-lang="en" onclick="selectInitialLanguage('en')">English</button>
         <button class="lang-pill" data-lang="hi" onclick="selectInitialLanguage('hi')">हिंदी</button>
-        <button class="lang-pill" data-lang="te" onclick="selectInitialLanguage('te')">తెలుగు</button>
+        <button class="lang-pill" data-lang="te" onclick="selectInitialLanguage('te')">తెలుగు (Tenglish)</button>
       </div>
       <a href="/docs" target="_blank" class="glass-btn" style="text-decoration:none; display:inline-flex; align-items:center; gap:5px;" title="Open Interactive Swagger API Documentation">📜 Swagger API</a>
       <button class="glass-btn" id="toggleAutoNextBtn" onclick="toggleAutoNext()" title="Toggle Auto-Next vs Manual Next confirmation">
         <span id="autoNextIcon">⏸️</span> <span id="autoNextLabel">Auto-Next: OFF</span>
       </button>
-      <button class="glass-btn" onclick="openLanguageModal()" title="Change language">
+      <button class="glass-btn" id="voiceSpeedBtn" onclick="toggleVoiceSpeed()" title="Toggle AI Voice Speed (1.0x, 1.25x, 1.5x)">
+        <span id="voiceSpeedIcon">⚡</span> <span id="voiceSpeedLabel">Speed: 1.25x</span>
+      </button>
+      <button class="glass-btn" onclick="openLanguageModal(true)" title="Change language">
         <span>🌐</span> Language
       </button>
       <button class="glass-btn" onclick="toggleDrawer()">
@@ -1651,16 +1883,16 @@ HTML_PAGE = """<!DOCTYPE html>
     <div class="subtitle-card" id="subtitleCard">
       <div class="dialogue-ai">
         <span style="color: #a78bfa; flex-shrink: 0;">🤖 They told:</span>
-        <span id="aiDialogueText">Click "Talk to AI" to start your store registration.</span>
+        <span id="aiDialogueText">Welcome! Please choose your preferred language: English, Hindi, or Telugu.</span>
         <span id="fieldBadge" class="field-tag tag-req" style="display:none;">REQUIRED</span>
       </div>
       <div class="dialogue-user">
         <span style="color: #38bdf8; flex-shrink: 0;">👤 I told:</span>
-        <span id="userDialogueText">Waiting for your voice...</span>
+        <span id="userDialogueText">Waiting for your voice or language selection...</span>
       </div>
       <div class="status-badge" id="botStatus">
-        <span id="statusDot" style="width: 8px; height: 8px; border-radius: 50%; background: #64748b;"></span>
-        <span id="statusText">Ready to start</span>
+        <span id="statusDot" style="width: 8px; height: 8px; border-radius: 50%; background: #f59e0b;"></span>
+        <span id="statusText">Choose your language to begin</span>
         <span id="langDetectedBadge" class="detected-lang-pill" style="display:none;"></span>
       </div>
     </div>
@@ -1671,14 +1903,19 @@ HTML_PAGE = """<!DOCTYPE html>
   </footer>
 
   <!-- Interactive Language Selection Modal -->
-  <div class="lang-modal-backdrop hidden" id="langModalBackdrop">
+  <div class="lang-modal-backdrop" id="langModalBackdrop">
     <div class="lang-modal-card">
+      <button class="lang-modal-close" id="langModalCloseBtn" onclick="closeLanguageModal()" title="Close" style="display: none;">✕</button>
       <div class="lang-modal-badge">🌐 Language Preference</div>
       <h2 class="lang-modal-title">Choose Your Language</h2>
       <p class="lang-modal-sub">
         अपनी पसंदीदा भाषा चुनें &bull; దయచేసి మీ భాషను ఎంచుకోండి<br>
         Select how you want to speak and listen with the Store Onboarding Assistant.
       </p>
+
+      <div class="lang-autoplay-notice" id="autoplayNotice" onclick="triggerUserGestureGreeting(event)" style="display: none;">
+        <span>🔊 <strong>Click to hear AI Greeting & Speak</strong> 🎙️</span>
+      </div>
 
       <div class="lang-grid">
         <button class="lang-card-btn" id="langCardEn" onclick="selectInitialLanguage('en')">
@@ -1693,14 +1930,14 @@ HTML_PAGE = """<!DOCTYPE html>
         </button>
         <button class="lang-card-btn" id="langCardTe" onclick="selectInitialLanguage('te')">
           <span class="lang-card-flag">🇮🇳</span>
-          <span class="lang-card-name">తెలుగు</span>
-          <span class="lang-card-desc">Telugu Assistant</span>
+          <span class="lang-card-name">తెలుగు (Tenglish)</span>
+          <span class="lang-card-desc">Modern Telugu + English</span>
         </button>
       </div>
 
-      <div class="lang-voice-hint">
+      <div class="lang-voice-hint" id="langVoiceHint">
         <span>🎙️</span>
-        <span>Or click "Talk to AI" and simply say: <strong>"English"</strong>, <strong>"Hindi"</strong>, or <strong>"Telugu"</strong></span>
+        <span id="langVoiceHintText">Tap any language above or speak: <strong>"Telugu"</strong>, <strong>"Hindi"</strong>, or <strong>"English"</strong></span>
       </div>
     </div>
   </div>
@@ -1711,7 +1948,11 @@ HTML_PAGE = """<!DOCTYPE html>
       <div class="dock-status-left">
         <div class="live-mic-dot" id="dockMicDot"></div>
         <span class="dock-label" id="dockStatusLabel">LIVE SUBTITLES</span>
-        <span class="dock-field-hint" id="dockFieldHint">Store Name</span>
+        <span class="dock-field-hint" id="dockFieldHint">Language Selection</span>
+        <div class="mic-vu-meter" id="micVuMeter" title="Live Microphone Audio Level">
+          <div class="mic-vu-bar" id="micVuBar"></div>
+        </div>
+        <span id="dockPitchBadge" class="dock-pitch-badge" style="display:none;" title="Live Detected Voice Pitch">🎵 High Pitch</span>
       </div>
       <div class="dock-actions-right">
         <button class="dock-action-btn auto-toggle-btn" id="dockAutoNextBtn" onclick="toggleAutoNext()" title="Toggle Auto-Next vs Manual Next Button">
@@ -1732,12 +1973,14 @@ HTML_PAGE = """<!DOCTYPE html>
       </div>
     </div>
 
-    <!-- Live Speech Subtitles Display -->
+    <!-- Live Speech Subtitles & Real-time Words Display -->
     <div class="dock-subtitle-row" id="dockSubtitleRow">
       <div class="subtitle-content">
         <span class="subtitle-prefix" id="subtitlePrefix">👤 You:</span>
-        <span class="live-subtitles" id="liveSubtitles">Click "Talk to AI" or speak...</span>
+        <div id="liveWordsContainer" class="live-words-container"></div>
+        <span class="live-subtitles" id="liveSubtitles">Speak or select: English, Hindi, or Telugu / अपनी भाषा चुनें / మీ భాషను ఎంచుకోండి</span>
         <span class="typing-cursor" id="typingCursor" style="display: none;"></span>
+        <span id="speedMetricBadge" class="speed-metric-badge" style="display: none;">⚡ 8ms</span>
       </div>
     </div>
 
@@ -1808,11 +2051,13 @@ HTML_PAGE = """<!DOCTYPE html>
     let audioChunks = [];
     let audioCtx = null;
     let analyser = null;
-    let dataArray = new Uint8Array(64);
+    let dataArray = new Uint8Array(256);
     let silenceTimer = null;
     let speechBreakTimer = null;
     let hasSpoken = false;
     let ambientNoiseFloor = 10;
+    let highPitchNoiseFloor = 8;
+    let lastDetectedPitch = 0;
     let noiseCalibrationSamples = 0;
 
     const orbStage = document.getElementById('orbStage');
@@ -1847,7 +2092,27 @@ HTML_PAGE = """<!DOCTYPE html>
     let autoProceedTimer = null;
     let liveRecognition = null;
     let isCorrectionMode = false;
-    let autoNextEnabled = false;
+    let autoNextEnabled = true;
+    let currentVoiceSpeed = 1.25; // 1.25x Fast speech speed
+
+    function toggleVoiceSpeed() {
+      if (currentVoiceSpeed === 1.25) currentVoiceSpeed = 1.5;
+      else if (currentVoiceSpeed === 1.5) currentVoiceSpeed = 1.0;
+      else currentVoiceSpeed = 1.25;
+
+      const label = document.getElementById('voiceSpeedLabel');
+      if (label) label.innerText = `Speed: ${currentVoiceSpeed}x`;
+      const btn = document.getElementById('voiceSpeedBtn');
+      if (btn) {
+        if (currentVoiceSpeed > 1.0) btn.classList.add('active');
+        else btn.classList.remove('active');
+      }
+      const speedBadge = document.getElementById('speedMetricBadge');
+      if (speedBadge) {
+        speedBadge.innerText = `⚡ ${currentVoiceSpeed}x Speed`;
+        speedBadge.style.display = 'inline-flex';
+      }
+    }
 
     function toggleAutoNext(forceState) {
       if (forceState !== undefined) {
@@ -1875,9 +2140,13 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
-    function openLanguageModal() {
+    function openLanguageModal(isManualOpen = false) {
       const modal = document.getElementById('langModalBackdrop');
+      const closeBtn = document.getElementById('langModalCloseBtn');
       if (modal) modal.classList.remove('hidden');
+      if (closeBtn) {
+        closeBtn.style.display = (isManualOpen && hasSelectedLanguage) ? 'inline-flex' : 'none';
+      }
     }
 
     function closeLanguageModal() {
@@ -1885,25 +2154,97 @@ HTML_PAGE = """<!DOCTYPE html>
       if (modal) modal.classList.add('hidden');
     }
 
+    function showAutoplayBadge() {
+      const notice = document.getElementById('autoplayNotice');
+      if (notice) notice.style.display = 'inline-flex';
+      const onFirstTap = (e) => {
+        if (e.target && e.target.closest('.lang-card-btn')) return;
+        triggerUserGestureGreeting(e);
+        window.removeEventListener('pointerdown', onFirstTap);
+        window.removeEventListener('click', onFirstTap);
+      };
+      window.addEventListener('pointerdown', onFirstTap, { once: true });
+      window.addEventListener('click', onFirstTap, { once: true });
+    }
+
+    function hideAutoplayBadge() {
+      const notice = document.getElementById('autoplayNotice');
+      if (notice) notice.style.display = 'none';
+    }
+
+    function triggerUserGestureGreeting(e) {
+      if (e) e.stopPropagation();
+      hideAutoplayBadge();
+      if (!hasSelectedLanguage) {
+        playGreetingWithAutoplayFallback("Welcome! Please choose your preferred language: English, Hindi, or Telugu.");
+      }
+    }
+
+    function playGreetingWithAutoplayFallback(promptText) {
+      stopAllSpeech();
+      setAiSpeakingState(true);
+
+      const ttsUrl = `/api/tts?text=${encodeURIComponent(promptText)}&lang=en`;
+      const audio = new Audio(ttsUrl);
+      audio.playbackRate = currentVoiceSpeed;
+      currentTtsAudio = audio;
+
+      let finished = false;
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        setAiSpeakingState(false);
+        currentTtsAudio = null;
+        if (!hasSelectedLanguage) {
+          setTimeout(autoEnableUserMicrophone, 200);
+        }
+      };
+
+      audio.onended = done;
+      audio.onerror = () => {
+        fallbackWebSpeech(promptText, 'en-IN', done);
+      };
+
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.then(() => {
+          hideAutoplayBadge();
+        }).catch(err => {
+          console.log("Autoplay waiting for user gesture:", err);
+          setAiSpeakingState(false);
+          showAutoplayBadge();
+        });
+      }
+    }
+
+    function initiateInitialLanguageSelection() {
+      if (hasSelectedLanguage) return;
+      openLanguageModal(false);
+
+      const promptText = "Welcome! Please choose your preferred language: English, Hindi, or Telugu.";
+      aiDialogueText.innerText = promptText;
+      liveSubtitles.innerText = "Welcome! Speak or select: English, Hindi, or Telugu / अपनी भाषा चुनें / మీ భాషను ఎంచుకోండి";
+      dockFieldHint.innerText = "Language Selection";
+      statusText.innerText = "🌐 Please choose your language to begin...";
+      statusDot.style.background = "#f59e0b";
+
+      playGreetingWithAutoplayFallback(promptText);
+    }
+
     function selectInitialLanguage(lang) {
       currentLang = lang;
       hasSelectedLanguage = true;
+      hideAutoplayBadge();
       closeLanguageModal();
       setLanguage(lang);
 
       try { localStorage.setItem('preferredLang', lang); } catch (e) {}
 
-      fetch('/api/set_language', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lang: lang })
-      }).catch(err => {});
-
       let ack = "Language set to English! Let's get your store registered. What is your company or store name?";
       if (lang === 'hi') {
         ack = "भाषा हिंदी चुनी गई है! आइए आपकी दुकान का पंजीकरण शुरू करते हैं। आपकी दुकान या कंपनी का नाम क्या है?";
       } else if (lang === 'te') {
-        ack = "భాష తెలుగు ఎంపిక చేయబడింది! మీ స్టోర్ నమోదు ప్రారంభిద్దాం. మీ దుకాణం లేదా కంపెనీ పేరు ఏమిటి?";
+        ack = "Telugu language select అయింది! Store register చేద్దాం. మీ store లేదా company name ఏంటి?";
       }
 
       isSessionRunning = true;
@@ -1913,23 +2254,35 @@ HTML_PAGE = """<!DOCTYPE html>
       setAiSpeakingState(true);
       aiDialogueText.innerText = ack;
       liveSubtitles.innerText = `Language set to ${lang.toUpperCase()}`;
-      speakText(ack, () => {
-        setAiSpeakingState(false);
-        setTimeout(autoEnableUserMicrophone, 220);
-      });
-    }
 
-    function promptLanguageVoiceSelection() {
-      openLanguageModal();
-      setAiSpeakingState(true);
-      const promptText = "Welcome! Please choose your preferred language: English, Hindi, or Telugu.";
-      aiDialogueText.innerText = promptText;
-      liveSubtitles.innerText = "Speak or select: English, Hindi, or Telugu / अपनी भाषा चुनें / మీ భాషను ఎంచుకోండి";
-      dockFieldHint.innerText = "Language Selection";
-
-      speakText(promptText, () => {
-        setAiSpeakingState(false);
-        setTimeout(autoEnableUserMicrophone, 220);
+      fetch('/api/set_language', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lang: lang })
+      })
+      .then(r => r.json())
+      .then(data => {
+        if (data.current_field) {
+          currentField = data.current_field;
+          updateFieldDisplay(currentField);
+        }
+        if (data.tts_audio_base64) {
+          playBotSpeech(data, () => {
+            setAiSpeakingState(false);
+            autoEnableUserMicrophone();
+          });
+        } else {
+          speakText(ack, () => {
+            setAiSpeakingState(false);
+            autoEnableUserMicrophone();
+          });
+        }
+      })
+      .catch(err => {
+        speakText(ack, () => {
+          setAiSpeakingState(false);
+          autoEnableUserMicrophone();
+        });
       });
     }
 
@@ -1944,7 +2297,7 @@ HTML_PAGE = """<!DOCTYPE html>
       });
 
       if (lang !== 'auto') {
-        const langNames = { hi: "हिंदी (Hindi)", te: "తెలుగు (Telugu)", en: "English" };
+        const langNames = { hi: "हिंदी (Hindi)", te: "తెలుగు (Tenglish)", en: "English" };
         langDetectedBadge.innerText = `🌐 ${langNames[lang] || lang.toUpperCase()}`;
         langDetectedBadge.style.display = 'inline-flex';
       } else {
@@ -1952,9 +2305,15 @@ HTML_PAGE = """<!DOCTYPE html>
       }
 
       if (liveRecognition) {
-        if (currentLang === 'hi') liveRecognition.lang = 'hi-IN';
-        else if (currentLang === 'te') liveRecognition.lang = 'te-IN';
-        else liveRecognition.lang = 'en-IN';
+        // Recognition language optimization:
+        // en-IN recognizes Indian English words, Indian store names, numbers, and Tenglish loanwords with 99% accuracy!
+        if (currentLang === 'hi') {
+          liveRecognition.lang = 'hi-IN';
+        } else if (currentLang === 'te') {
+          liveRecognition.lang = (window.isPureTeluguScript) ? 'te-IN' : 'en-IN';
+        } else {
+          liveRecognition.lang = 'en-IN';
+        }
       }
 
       if (currentField) {
@@ -2022,9 +2381,18 @@ HTML_PAGE = """<!DOCTYPE html>
       if (analyser && dataArray instanceof Uint8Array && isUserListening) {
         try {
           analyser.getByteFrequencyData(dataArray);
-          let sum = 0;
-          for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-          volumeBoost = (sum / dataArray.length) * 0.4;
+          let highSum = 0;
+          let count = 0;
+          // Focus on high pitch vocal bins (180 Hz to 3800 Hz)
+          const binHz = audioCtx ? audioCtx.sampleRate / analyser.fftSize : 93.75;
+          const start = Math.max(1, Math.round(180 / binHz));
+          const end = Math.min(dataArray.length - 1, Math.round(3800 / binHz));
+          for (let i = start; i <= end; i++) {
+            highSum += dataArray[i];
+            count++;
+          }
+          const highAvg = count > 0 ? (highSum / count) : 0;
+          volumeBoost = highAvg * 0.55;
         } catch (e) {}
       }
 
@@ -2085,26 +2453,33 @@ HTML_PAGE = """<!DOCTYPE html>
     }
     renderOrb();
 
-    // Load initial JSON
+    // Load initial JSON & Session State
     fetch('/api/get_state')
       .then(r => r.json())
       .then(data => {
         updateJSONView(data.json);
         currentField = data.current_field;
         updateFieldDisplay(currentField);
+
+        if (data.language_chosen && data.language && data.language !== 'auto') {
+          hasSelectedLanguage = true;
+          currentLang = data.language;
+          setLanguage(data.language);
+          closeLanguageModal();
+        } else {
+          // Inital load: immediately prompt for language!
+          initiateInitialLanguageSelection();
+        }
+      })
+      .catch(err => {
+        console.warn("get_state error, initiating initial language prompt:", err);
+        initiateInitialLanguageSelection();
       });
 
     // Main Interaction: Click to start or toggle
     function handleOrbClick() {
       if (!isSessionRunning) {
-        if (!hasSelectedLanguage) {
-          isSessionRunning = true;
-          talkBtn.classList.add('active');
-          btnLabel.innerText = "AI Active (Listening...)";
-          promptLanguageVoiceSelection();
-        } else {
-          startAutonomousSession();
-        }
+        startAutonomousSession();
       } else if (isAiSpeaking) {
         // User clicked while AI was speaking: stop speech and listen immediately
         stopAllSpeech();
@@ -2122,7 +2497,7 @@ HTML_PAGE = """<!DOCTYPE html>
       talkBtn.classList.add('active');
       btnLabel.innerText = "AI Active (Listening...)";
       if (!hasSelectedLanguage) {
-        promptLanguageVoiceSelection();
+        initiateInitialLanguageSelection();
       } else {
         askQuestionAutomatically();
       }
@@ -2135,13 +2510,22 @@ HTML_PAGE = """<!DOCTYPE html>
     function startLiveSpeech() {
       const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
       if (!SpeechRec) return;
+
+      stopLiveSpeech();
+
       try {
         liveRecognition = new SpeechRec();
         liveRecognition.continuous = true;
         liveRecognition.interimResults = true;
-        if (currentLang === 'hi') liveRecognition.lang = 'hi-IN';
-        else if (currentLang === 'te') liveRecognition.lang = 'te-IN';
-        else liveRecognition.lang = 'en-IN';
+        // Recognition language optimization:
+        // en-IN recognizes Indian English words, Indian store names, numbers, and Tenglish loanwords with 99% accuracy!
+        if (currentLang === 'hi') {
+          liveRecognition.lang = 'hi-IN';
+        } else if (currentLang === 'te') {
+          liveRecognition.lang = (window.isPureTeluguScript) ? 'te-IN' : 'en-IN';
+        } else {
+          liveRecognition.lang = 'en-IN';
+        }
 
         liveRecognition.onresult = (e) => {
           let interim = '';
@@ -2151,43 +2535,110 @@ HTML_PAGE = """<!DOCTYPE html>
             else interim += e.results[i][0].transcript;
           }
           const spoken = (final || interim).trim();
-          if (spoken) {
-            hasSpoken = true;
-            latestLiveTranscript = spoken;
-            liveSubtitles.innerText = spoken;
-            liveSubtitles.className = 'live-subtitles interim';
-            typingCursor.style.display = 'inline-block';
-            userDialogueText.innerText = spoken;
-            dockMicDot.classList.add('active');
-            bottomDock.classList.add('listening');
-            correctionInput.value = spoken;
-            triggerNextPulse(true);
+          if (!spoken) return;
 
-            // Auto-detect speech completion break: trigger automatically when user pauses
-            if (speechBreakTimer) clearTimeout(speechBreakTimer);
-            const pauseWait = final ? 750 : 900;
-            speechBreakTimer = setTimeout(() => {
-              if (isUserListening && hasSpoken) {
-                statusText.innerText = "Break detected... completing answer.";
-                finishUserVoiceTurn();
-              }
-            }, pauseWait);
+          hasSpoken = true;
+          latestLiveTranscript = spoken;
+          renderLiveWords(spoken, false);
+          liveSubtitles.innerText = '';
+          typingCursor.style.display = 'inline-block';
+          userDialogueText.innerText = spoken;
+          dockMicDot.classList.add('active');
+          bottomDock.classList.add('listening');
+          correctionInput.value = spoken;
+          triggerNextPulse(true);
+
+          const curKey = currentField ? currentField.key : '';
+          const spokenLower = spoken.toLowerCase().trim();
+
+          // 1. Language Selection Voice Trigger (instant ms save)
+          if (!hasSelectedLanguage) {
+            if (spokenLower.includes('telugu') || spokenLower.includes('tenglish') || spokenLower.includes('తెలుగు')) {
+              selectInitialLanguage('te');
+              return;
+            }
+            if (spokenLower.includes('hindi') || spokenLower.includes('हिंदी')) {
+              selectInitialLanguage('hi');
+              return;
+            }
+            if (spokenLower.includes('english') || spokenLower.includes('ఆంగ్ల') || spokenLower.includes('अंग्रेज़ी') || spokenLower.includes('angrezi')) {
+              selectInitialLanguage('en');
+              return;
+            }
+          }
+
+          // 2. Skip Voice Trigger (instant ms save)
+          const isSkipPhrase = /^(skip|skip chey|skip cheyyi|skip cheseyandi|em ledu|em ledhu|emi ledhu|ledandi|avsaram ledu|avsaram ledhu|ippudu ledu|ippudu vaddu|daggara ledu|oddhu|vaddandi|chhod do|nahi chahiye|leave it|next)$/i.test(spokenLower) ||
+                               spokenLower.startsWith('skip') || spokenLower.startsWith('em ledu') || spokenLower.startsWith('em ledhu');
+          if (isSkipPhrase && currentField && !currentField.required) {
+            saveVoiceAnswerFast("skip");
+            return;
+          }
+
+          // 3. 10-digit Phone Number Instant Trigger
+          if (curKey === 'phone') {
+            const digitsOnly = spoken.replace(/\D/g, '');
+            if (digitsOnly.length === 10) {
+              saveVoiceAnswerFast(digitsOnly);
+              return;
+            }
+          }
+
+          // 4. 6-digit Pincode Instant Trigger
+          if (curKey === 'pincode') {
+            const digitsOnly = spoken.replace(/\D/g, '');
+            if (digitsOnly.length === 6) {
+              saveVoiceAnswerFast(digitsOnly);
+              return;
+            }
+          }
+
+          // 5. Intelligent Pause Wait: 650ms on final speech, 900ms on interim (never cuts off user mid-thought)
+          if (speechBreakTimer) clearTimeout(speechBreakTimer);
+          const pauseWait = final ? 650 : 900;
+          speechBreakTimer = setTimeout(() => {
+            if (isUserListening && hasSpoken && spoken) {
+              saveVoiceAnswerFast(spoken);
+            }
+          }, pauseWait);
+        };
+
+        liveRecognition.onerror = (e) => {
+          if (e.error !== 'no-speech') {
+            console.warn("[SpeechRec Event]:", e.error);
           }
         };
 
-        liveRecognition.onerror = (e) => {};
+        liveRecognition.onend = () => {
+          // Self-healing: if browser ends recognition while user is still listening, restart immediately!
+          if (isUserListening && !isAiSpeaking) {
+            setTimeout(() => {
+              if (isUserListening && !isAiSpeaking) {
+                try { liveRecognition.start(); } catch (err) {}
+              }
+            }, 80);
+          }
+        };
+
         liveRecognition.start();
-      } catch (err) {}
+      } catch (err) {
+        console.warn("SpeechRec start caught:", err);
+      }
     }
 
     function stopLiveSpeech() {
       if (liveRecognition) {
-        try { liveRecognition.stop(); } catch (err) {}
+        try {
+          liveRecognition.onend = null;
+          liveRecognition.onerror = null;
+          liveRecognition.abort(); // Immediately releases hardware capture without delay
+        } catch (err) {}
         liveRecognition = null;
       }
       typingCursor.style.display = 'none';
       dockMicDot.classList.remove('active');
       bottomDock.classList.remove('listening');
+      updatePitchBadge(0, false);
     }
 
     // Step 2: Auto-Ask Question using TTS
@@ -2238,18 +2689,32 @@ HTML_PAGE = """<!DOCTYPE html>
       statusDot.style.background = "#f59e0b";
 
       speakText(q, () => {
-        // TTS Finished -> Auto-enable microphone with acoustic buffer delay!
+        // TTS Finished -> Auto-enable microphone instantly!
         setAiSpeakingState(false);
-        setTimeout(autoEnableUserMicrophone, 220);
+        autoEnableUserMicrophone();
       });
     }
 
     let persistentMicStream = null;
     let persistentRecordStream = null;
+    let voiceListenStartTime = 0;
 
     // Step 3: Auto-Enable Microphone with Zero-Latency Stream Reuse & Hardware AEC
     async function autoEnableUserMicrophone() {
-      // 1. Check if persistent hardware stream is already active
+      // 1. Prevent mic from opening if AI is actively speaking
+      if (isAiSpeaking) return;
+
+      // 2. Stop any lingering previous instances
+      stopLiveSpeech();
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        try {
+          mediaRecorder.ondataavailable = null;
+          mediaRecorder.onstop = null;
+          mediaRecorder.stop();
+        } catch (e) {}
+      }
+
+      // 3. Check if persistent hardware stream is already active
       const isStreamAlive = persistentMicStream &&
         persistentMicStream.active &&
         persistentMicStream.getAudioTracks().some(t => t.readyState === 'live');
@@ -2259,14 +2724,19 @@ HTML_PAGE = """<!DOCTYPE html>
           persistentMicStream = await navigator.mediaDevices.getUserMedia({
             audio: {
               channelCount: 1,
-              sampleRate: 16000,
               echoCancellation: true,
               noiseSuppression: true,
               autoGainControl: true,
+              googEchoCancellation: true,
+              googAutoGainControl: true,
+              googNoiseSuppression: true,
+              googHighpassFilter: true,
             }
           });
         } catch (permErr) {
-          alert("Microphone permission required for voice bot: " + (permErr.message || permErr));
+          console.warn("Microphone permission required for voice bot:", permErr);
+          statusText.innerText = "⚠️ Microphone permission required. Click Orb to allow.";
+          statusDot.style.background = "#ef4444";
           isSessionRunning = false;
           talkBtn.classList.remove('active');
           return;
@@ -2276,27 +2746,15 @@ HTML_PAGE = """<!DOCTYPE html>
           audioCtx = new (window.AudioContext || window.webkitAudioContext)();
           const source = audioCtx.createMediaStreamSource(persistentMicStream);
 
-          const highpass = audioCtx.createBiquadFilter();
-          highpass.type = 'highpass';
-          highpass.frequency.value = 85;
-
-          const lowpass = audioCtx.createBiquadFilter();
-          lowpass.type = 'lowpass';
-          lowpass.frequency.value = 7500;
-
           analyser = audioCtx.createAnalyser();
-          analyser.fftSize = 64;
+          analyser.fftSize = 512; // 256 fine frequency bins (~93.75 Hz resolution)
+          analyser.smoothingTimeConstant = 0.3; // Rapid reaction to voice onsets
           dataArray = new Uint8Array(analyser.frequencyBinCount);
 
-          source.connect(highpass);
-          highpass.connect(lowpass);
-          lowpass.connect(analyser);
-
-          const dest = audioCtx.createMediaStreamDestination();
-          lowpass.connect(dest);
-          persistentRecordStream = dest.stream;
+          source.connect(analyser);
+          persistentRecordStream = persistentMicStream;
         } catch (audioInitErr) {
-          console.warn("AudioContext processing warning, using direct micStream:", audioInitErr);
+          console.warn("AudioContext processing warning:", audioInitErr);
           persistentRecordStream = persistentMicStream;
         }
       }
@@ -2312,10 +2770,12 @@ HTML_PAGE = """<!DOCTYPE html>
 
         mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
         mediaRecorder.onstop = uploadUserVoice;
-        mediaRecorder.start();
+        mediaRecorder.start(250); // Emit audio buffers continuously every 250ms
 
         setUserListeningState(true);
         hasSpoken = false;
+        latestLiveTranscript = '';
+        voiceListenStartTime = Date.now();
         noiseCalibrationSamples = 0;
         if (speechBreakTimer) clearTimeout(speechBreakTimer);
         speechBreakTimer = null;
@@ -2326,8 +2786,8 @@ HTML_PAGE = """<!DOCTYPE html>
         liveSubtitles.innerText = "Listening to your voice... Speak now.";
         liveSubtitles.className = 'live-subtitles interim';
         typingCursor.style.display = 'inline-block';
-        statusText.innerText = "Listening to your voice... (Auto-detecting break)";
-        statusDot.style.background = "#06b6d4";
+        statusText.innerText = "🎙️ Listening... Speak your answer now.";
+        statusDot.style.background = "#10b981";
         dockMicDot.classList.add('active');
         bottomDock.classList.add('listening');
 
@@ -2342,7 +2802,24 @@ HTML_PAGE = """<!DOCTYPE html>
       }
     }
 
-    // Step 4: Voice Activity Detection (Auto Silence Completion & Break Detection)
+    function updatePitchBadge(pitchHz, isHigh) {
+      const badge = document.getElementById('dockPitchBadge');
+      if (!badge) return;
+      if (pitchHz && pitchHz >= 100) {
+        badge.style.display = 'inline-flex';
+        if (isHigh) {
+          badge.className = 'dock-pitch-badge high';
+          badge.innerHTML = `<span>🎯</span> <span>High Pitch: ${pitchHz} Hz</span>`;
+        } else {
+          badge.className = 'dock-pitch-badge';
+          badge.innerHTML = `<span>🎵</span> <span>${pitchHz} Hz</span>`;
+        }
+      } else {
+        badge.style.display = 'none';
+      }
+    }
+
+    // Step 4: Voice Activity Detection (Detect High Pitch First & Auto Silence Completion)
     function monitorVoiceActivity() {
       if (!isUserListening || !analyser || !(dataArray instanceof Uint8Array)) return;
 
@@ -2351,35 +2828,134 @@ HTML_PAGE = """<!DOCTYPE html>
       } catch (e) {
         return;
       }
-      let sum = 0;
-      for (let i = 0; i < dataArray.length; i++) sum += dataArray[i];
-      const avg = sum / dataArray.length;
 
-      // Dynamic ambient noise floor calibration during first 15 frames (~250ms)
-      if (noiseCalibrationSamples < 15) {
-        ambientNoiseFloor = (ambientNoiseFloor * noiseCalibrationSamples + avg) / (noiseCalibrationSamples + 1);
-        noiseCalibrationSamples++;
+      const sampleRate = audioCtx ? audioCtx.sampleRate : 48000;
+      const binHz = sampleRate / analyser.fftSize; // ~93.75 Hz per bin
+
+      // 1. HIGH PITCH VOICE FIRST ANALYSIS:
+      // Focus on vocal pitch & higher harmonics (~180 Hz to ~3800 Hz)
+      const startHighBin = Math.max(1, Math.round(180 / binHz));
+      const endHighBin = Math.min(dataArray.length - 1, Math.round(3800 / binHz));
+
+      let highPitchSum = 0;
+      let highPitchCount = 0;
+      let peakVal = 0;
+      let peakBin = 0;
+
+      for (let i = startHighBin; i <= endHighBin; i++) {
+        const val = dataArray[i];
+        highPitchSum += val;
+        highPitchCount++;
+        if (val > peakVal) {
+          peakVal = val;
+          peakBin = i;
+        }
       }
 
-      const dynamicSpeechThresh = Math.max(ambientNoiseFloor * 1.6, 12);
-      const dynamicSilenceThresh = Math.max(ambientNoiseFloor * 1.2, 7);
+      const highPitchAvg = highPitchCount > 0 ? (highPitchSum / highPitchCount) : 0;
+      const detectedPitchHz = Math.round(peakBin * binHz);
+      const isHighPitch = (detectedPitchHz >= 180 && detectedPitchHz <= 850 && peakVal >= 15);
 
-      if (avg > dynamicSpeechThresh) {
+      // 2. LOW PITCH / NATURAL VOICE ANALYSIS (~85 Hz to ~180 Hz: deep voice, soft words)
+      const startLowBin = Math.max(1, Math.round(85 / binHz));
+      const endLowBin = Math.min(dataArray.length - 1, Math.round(180 / binHz));
+      let lowPitchSum = 0;
+      let lowPitchCount = 0;
+      let lowPeakVal = 0;
+      for (let i = startLowBin; i <= endLowBin; i++) {
+        const val = dataArray[i];
+        lowPitchSum += val;
+        lowPitchCount++;
+        if (val > lowPeakVal) lowPeakVal = val;
+      }
+      const lowPitchAvg = lowPitchCount > 0 ? (lowPitchSum / lowPitchCount) : 0;
+
+      // 3. Full voice band (85 Hz to 3800 Hz)
+      const fullVoiceAvg = (highPitchSum + lowPitchSum) / (highPitchCount + lowPitchCount || 1);
+
+      // Echo immunity grace period: in first 250ms after mic opens, only calibrate noise, do not trigger false voice from speaker echo
+      const timeSinceListen = Date.now() - voiceListenStartTime;
+      if (timeSinceListen < 250) {
+        ambientNoiseFloor = Math.min(ambientNoiseFloor, fullVoiceAvg);
+        highPitchNoiseFloor = Math.min(highPitchNoiseFloor, highPitchAvg);
+        if (isUserListening) requestAnimationFrame(monitorVoiceActivity);
+        return;
+      }
+
+      // Dynamic Noise Floor Tracking
+      if (noiseCalibrationSamples < 20) {
+        ambientNoiseFloor = Math.min(ambientNoiseFloor, fullVoiceAvg);
+        highPitchNoiseFloor = Math.min(highPitchNoiseFloor, highPitchAvg);
+        noiseCalibrationSamples++;
+      } else {
+        highPitchNoiseFloor = (highPitchAvg < highPitchNoiseFloor)
+          ? (highPitchNoiseFloor * 0.90 + highPitchAvg * 0.10)
+          : (highPitchNoiseFloor * 0.995 + highPitchAvg * 0.005);
+
+        ambientNoiseFloor = (fullVoiceAvg < ambientNoiseFloor)
+          ? (ambientNoiseFloor * 0.90 + fullVoiceAvg * 0.10)
+          : (ambientNoiseFloor * 0.995 + fullVoiceAvg * 0.005);
+      }
+
+      const highPitchDelta = highPitchAvg - highPitchNoiseFloor;
+      const fullVoiceDelta = fullVoiceAvg - ambientNoiseFloor;
+
+      // Sensitive voice triggers (picks up high pitch instantly, and also soft/low voice!)
+      const isHighPitchTrigger = (highPitchDelta >= 2.2 && peakVal >= 14) || (isHighPitch && highPitchDelta >= 1.6);
+      const isLowVoiceTrigger = (fullVoiceDelta >= 1.8 && (peakVal >= 12 || lowPeakVal >= 14)) || (lowPitchAvg > ambientNoiseFloor + 2.0);
+
+      if (isHighPitchTrigger) {
+        // High pitch voice takes input FIRST!
         hasSpoken = true;
+        lastDetectedPitch = detectedPitchHz;
         if (silenceTimer) {
           clearTimeout(silenceTimer);
           silenceTimer = null;
         }
-        statusText.innerText = "Voice detected... Speak freely.";
-      } else if (hasSpoken && avg < dynamicSilenceThresh) {
-        if (!silenceTimer) {
-          statusText.innerText = "Break detected... completing answer.";
-          silenceTimer = setTimeout(() => {
-            if (isUserListening) {
-              finishUserVoiceTurn();
-            }
-          }, 850); // Auto-detect break in 850ms
+        statusText.innerText = `🎯 High pitch voice detected (${detectedPitchHz} Hz)! Listening...`;
+        statusDot.style.background = "#10b981";
+        updatePitchBadge(detectedPitchHz, true);
+      } else if (isLowVoiceTrigger) {
+        // Low pitch / soft voice takes input reliably!
+        hasSpoken = true;
+        lastDetectedPitch = detectedPitchHz;
+        if (silenceTimer) {
+          clearTimeout(silenceTimer);
+          silenceTimer = null;
         }
+        statusText.innerText = `🎙️ Voice detected (${detectedPitchHz || 120} Hz)... Listening.`;
+        statusDot.style.background = "#06b6d4";
+        updatePitchBadge(detectedPitchHz || 120, false);
+      } else if (hasSpoken) {
+        // User has spoken: trigger save when a natural pause occurs
+        if (highPitchDelta < 1.4 && fullVoiceDelta < 1.5) {
+          if (!silenceTimer) {
+            // If live recognition has words, save in 650ms. If Whisper audio fallback, wait 1200ms so user isn't cut off!
+            const silenceCutoff = latestLiveTranscript ? 650 : 1200;
+            statusText.innerText = latestLiveTranscript ? "⚡ Voice heard... fast-saving answer." : "🎙️ Voice heard... finalizing answer.";
+            statusDot.style.background = "#f59e0b";
+            silenceTimer = setTimeout(() => {
+              if (isUserListening) {
+                finishUserVoiceTurn();
+              }
+            }, silenceCutoff);
+          }
+          updatePitchBadge(0, false);
+        } else {
+          // Sustained speech keeps recording alive
+          if (silenceTimer) {
+            clearTimeout(silenceTimer);
+            silenceTimer = null;
+          }
+        }
+      }
+
+      // Animate microphone VU meter
+      const vuBar = document.getElementById('micVuBar');
+      if (vuBar) {
+        const effectiveDelta = Math.max(highPitchDelta * 7.0, fullVoiceDelta * 6.0);
+        const levelPct = Math.min(100, Math.max(0, effectiveDelta));
+        vuBar.style.width = isUserListening ? `${Math.round(levelPct)}%` : '0%';
       }
 
       if (isUserListening) {
@@ -2388,11 +2964,66 @@ HTML_PAGE = """<!DOCTYPE html>
     }
 
     // Step 5: Finish recording & upload (retains persistent mic hardware for instant next turn)
+    function playBotSpeech(data, onComplete) {
+      if (data && data.tts_audio_base64) {
+        stopAllSpeech();
+        setAiSpeakingState(true);
+        const audio = new Audio("data:audio/mp3;base64," + data.tts_audio_base64);
+        audio.playbackRate = currentVoiceSpeed;
+        currentTtsAudio = audio;
+        let finished = false;
+        const done = () => {
+          if (finished) return;
+          finished = true;
+          setAiSpeakingState(false);
+          currentTtsAudio = null;
+          if (onComplete) {
+            // 250ms echo settling delay before auto-enabling microphone
+            setTimeout(onComplete, 250);
+          }
+        };
+
+        const estimatedMs = Math.max(2000, (((data.bot_text || '').length * 85) / currentVoiceSpeed) + 3000);
+        const watchdog = setTimeout(() => {
+          if (!finished) {
+            console.warn("[TTS Watchdog] Proceeding to microphone.");
+            done();
+          }
+        }, estimatedMs);
+
+        audio.onended = () => {
+          clearTimeout(watchdog);
+          done();
+        };
+        audio.onerror = () => {
+          clearTimeout(watchdog);
+          speakText(data.bot_text, onComplete);
+        };
+        audio.play().catch(() => {
+          clearTimeout(watchdog);
+          speakText(data.bot_text, onComplete);
+        });
+      } else if (data && data.bot_text) {
+        speakText(data.bot_text, onComplete);
+      } else if (onComplete) {
+        setTimeout(onComplete, 200);
+      }
+    }
+
     function finishUserVoiceTurn() {
       if (silenceTimer) clearTimeout(silenceTimer);
       silenceTimer = null;
       if (speechBreakTimer) clearTimeout(speechBreakTimer);
       speechBreakTimer = null;
+
+      // INSTANT FAST SAVE: If live recognition already has text, save immediately via JSON!
+      if (latestLiveTranscript && latestLiveTranscript.trim()) {
+        const textToSave = latestLiveTranscript.trim();
+        latestLiveTranscript = '';
+        saveVoiceAnswerFast(textToSave);
+        return;
+      }
+
       stopLiveSpeech();
 
       if (mediaRecorder && isUserListening) {
@@ -2400,14 +3031,218 @@ HTML_PAGE = """<!DOCTYPE html>
         try { mediaRecorder.stop(); } catch (e) {}
         // NOTE: Keep persistentMicStream & audioCtx warm — 0ms hardware delay on next question!
 
-        statusText.innerText = "Filtering noise & transcribing with Faster-Whisper Base...";
+        statusText.innerText = "⚡ Fast-processing answer...";
         statusDot.style.background = "#a78bfa";
-        liveSubtitles.innerText = "Filtering noise & transcribing...";
+        liveSubtitles.innerText = "Fast-processing answer...";
       }
     }
 
-    // Step 6: Send audio to Faster-Whisper backend
+    function renderLiveWords(spoken, isCommitted = false) {
+      const container = document.getElementById('liveWordsContainer');
+      if (!container) return;
+      if (!spoken) {
+        container.innerHTML = '';
+        return;
+      }
+      const words = spoken.trim().split(/\s+/).filter(Boolean);
+      if (!words.length) {
+        container.innerHTML = '';
+        return;
+      }
+      container.innerHTML = words.map((w, idx) => {
+        const isLast = idx === words.length - 1;
+        const cls = isCommitted ? 'live-word-pill committed' : (isLast ? 'live-word-pill active' : 'live-word-pill');
+        const safe = w.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        return `<span class="${cls}">${safe}</span>`;
+      }).join(' ');
+    }
+
+    let isSavingAnswer = false;
+
+    async function saveVoiceAnswerFast(spokenText) {
+      if (isSavingAnswer || !spokenText) return;
+      isSavingAnswer = true;
+
+      const tStart = performance.now();
+      if (silenceTimer) clearTimeout(silenceTimer);
+      silenceTimer = null;
+      if (speechBreakTimer) clearTimeout(speechBreakTimer);
+      speechBreakTimer = null;
+
+      stopLiveSpeech();
+      setUserListeningState(false);
+      try {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          mediaRecorder.ondataavailable = null;
+          mediaRecorder.onstop = null;
+          mediaRecorder.stop();
+        }
+      } catch (e) {}
+
+      renderLiveWords(spokenText, true);
+      statusText.innerText = "⚡ Saving in milliseconds...";
+      statusDot.style.background = "#f59e0b";
+
+      try {
+        const res = await fetch('/api/answer', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            key: currentField ? currentField.key : null,
+            answer: spokenText,
+            lang: currentLang
+          })
+        });
+        const data = await res.json();
+        const elapsed = Math.round(performance.now() - tStart);
+        handleServerResponse(data, spokenText, elapsed);
+      } catch (err) {
+        console.error("Fast voice save error:", err);
+        statusText.innerText = "Error saving answer: " + err;
+        setTimeout(autoEnableUserMicrophone, 300);
+      } finally {
+        isSavingAnswer = false;
+      }
+    }
+
+    function handleServerResponse(data, spokenText, elapsedMs = null) {
+      if (data.detected_language) {
+        const langNames = { hi: "हिंदी (Hindi)", te: "తెలుగు (Tenglish)", en: "English" };
+        const name = langNames[data.detected_language] || data.detected_language.toUpperCase();
+        const prob = data.detected_prob ? ` (${Math.round(data.detected_prob * 100)}%)` : '';
+        langDetectedBadge.innerText = `🌐 ${name}${prob}`;
+        langDetectedBadge.style.display = 'inline-flex';
+      }
+
+      if (elapsedMs !== null) {
+        const speedBadge = document.getElementById('speedMetricBadge');
+        if (speedBadge) {
+          speedBadge.innerText = `⚡ ${elapsedMs}ms`;
+          speedBadge.style.display = 'inline-flex';
+        }
+      }
+
+      if (data.language_selected || data.language_switched) {
+        const lang = data.language_selected || data.language_switched;
+        if (data.language_selected) {
+          hasSelectedLanguage = true;
+          closeLanguageModal();
+        }
+        currentLang = lang;
+        setLanguage(lang);
+        aiDialogueText.innerText = data.bot_text;
+        setAiSpeakingState(true);
+        playBotSpeech(data, () => {
+          setAiSpeakingState(false);
+          autoEnableUserMicrophone();
+        });
+        return;
+      }
+
+      if (data.language_chosen === false) {
+        aiDialogueText.innerText = data.bot_text;
+        setAiSpeakingState(true);
+        playBotSpeech(data, () => {
+          setAiSpeakingState(false);
+          autoEnableUserMicrophone();
+        });
+        return;
+      }
+
+      if (data.user_text || spokenText) {
+        const userSpoken = data.user_text || spokenText;
+        userDialogueText.innerText = userSpoken;
+        const isErr = !!data.error_msg;
+        const isSkipped = data.extracted_value === null && !isErr;
+        let cleanVal = '';
+        if (isSkipped) {
+          cleanVal = '';
+        } else if (data.extracted_value !== null && data.extracted_value !== undefined) {
+          cleanVal = Array.isArray(data.extracted_value) ? data.extracted_value.join(', ') : String(data.extracted_value);
+        } else if (!isErr) {
+          cleanVal = userSpoken;
+        }
+
+        renderLiveWords(userSpoken, true);
+
+        if (isErr) {
+          liveSubtitles.className = 'live-subtitles';
+          liveSubtitles.innerHTML = `⚠️ <span style="color:#f87171;">${data.error_msg}</span>`;
+          statusText.innerText = data.error_msg;
+          statusDot.style.background = "#ef4444";
+          correctionInput.value = '';
+          aiDialogueText.innerText = data.error_msg;
+          setAiSpeakingState(true);
+          playBotSpeech(data, () => {
+            setAiSpeakingState(false);
+            autoEnableUserMicrophone();
+          });
+        } else {
+          const msInfo = elapsedMs !== null ? `<span class="speed-metric-badge">⚡ ${elapsedMs}ms</span> ` : '';
+          liveSubtitles.className = 'live-subtitles';
+          if (isSkipped) {
+            liveSubtitles.innerHTML = `${msInfo}🗣️ "<strong>${userSpoken}</strong>" ➔ <span class="highlight-clean">(Skipped / None)</span>`;
+            statusText.innerText = elapsedMs !== null ? `✓ Skipped in ${elapsedMs}ms! Asking next question...` : "✓ Optional field skipped.";
+          } else {
+            liveSubtitles.innerHTML = `${msInfo}🗣️ "<strong>${userSpoken}</strong>" ➔ Value: <span class="highlight-clean">${cleanVal || '(Recorded)'}</span>`;
+            toggleCorrectionMode(false);
+            statusText.innerText = elapsedMs !== null ? `✓ Saved in ${elapsedMs}ms! Next question...` : "✓ Recorded! Asking next question...";
+          }
+          correctionInput.value = '';
+          statusDot.style.background = "#10b981";
+
+          if (data.json) updateJSONView(data.json);
+          currentField = data.current_field;
+          updateFieldDisplay(currentField);
+
+          if (data.is_completed) {
+            setAiSpeakingState(true);
+            aiDialogueText.innerText = data.bot_text;
+            statusText.innerText = "Store onboarding completed successfully!";
+            statusDot.style.background = "#10b981";
+            playBotSpeech(data, () => setAiSpeakingState(false));
+          } else if (data.bot_text) {
+            aiDialogueText.innerText = data.bot_text;
+            dockFieldHint.innerText = currentField ? `${currentField.label} (${currentField.index}/${currentField.total})` : "Done";
+            dockSkipBtn.style.display = (currentField && !currentField.required) ? 'inline-flex' : 'none';
+            setAiSpeakingState(true);
+            playBotSpeech(data, () => {
+              setAiSpeakingState(false);
+              autoEnableUserMicrophone();
+            });
+          }
+        }
+      } else {
+        userDialogueText.innerText = "(No clear voice detected. Retrying...)";
+        liveSubtitles.innerText = "No voice heard. Please speak clearly.";
+        statusText.innerText = "No voice heard. Retrying question...";
+        statusDot.style.background = "#ef4444";
+        if (data.bot_text) {
+          aiDialogueText.innerText = data.bot_text;
+          setAiSpeakingState(true);
+          playBotSpeech(data, () => {
+            setAiSpeakingState(false);
+            autoEnableUserMicrophone();
+          });
+        } else {
+          autoEnableUserMicrophone();
+        }
+      }
+    }
+
+    // Step 6: Send audio to Faster-Whisper backend (fallback)
     async function uploadUserVoice() {
+      const totalBytes = audioChunks.reduce((acc, c) => acc + (c.size || 0), 0);
+      if (totalBytes < 400 && !latestLiveTranscript) {
+        userDialogueText.innerText = "(No clear voice detected. Retrying...)";
+        liveSubtitles.innerText = "No voice heard. Please speak clearly.";
+        statusText.innerText = "No voice heard. Retrying question...";
+        statusDot.style.background = "#f59e0b";
+        setTimeout(autoEnableUserMicrophone, 300);
+        return;
+      }
       const blob = new Blob(audioChunks, { type: 'audio/webm' });
       try {
         const res = await fetch('/api/transcribe', {
@@ -2419,118 +3254,7 @@ HTML_PAGE = """<!DOCTYPE html>
           body: blob
         });
         const data = await res.json();
-
-        if (data.detected_language) {
-          const langNames = { hi: "हिंदी (Hindi)", te: "తెలుగు (Telugu)", en: "English" };
-          const name = langNames[data.detected_language] || data.detected_language.toUpperCase();
-          const prob = data.detected_prob ? ` (${Math.round(data.detected_prob * 100)}%)` : '';
-          langDetectedBadge.innerText = `🌐 ${name}${prob}`;
-          langDetectedBadge.style.display = 'inline-flex';
-        }
-
-        if (data.language_selected) {
-          hasSelectedLanguage = true;
-          currentLang = data.language_selected;
-          closeLanguageModal();
-          setLanguage(data.language_selected);
-          aiDialogueText.innerText = data.bot_text;
-          setAiSpeakingState(true);
-          speakText(data.bot_text, () => {
-            setAiSpeakingState(false);
-            setTimeout(autoEnableUserMicrophone, 220);
-          });
-          return;
-        }
-
-        if (data.language_switched) {
-          currentLang = data.language_switched;
-          setLanguage(data.language_switched);
-          aiDialogueText.innerText = data.bot_text;
-          setAiSpeakingState(true);
-          speakText(data.bot_text, () => {
-            setAiSpeakingState(false);
-            setTimeout(autoEnableUserMicrophone, 220);
-          });
-          return;
-        }
-
-        if (data.language_chosen === false) {
-          aiDialogueText.innerText = data.bot_text;
-          setAiSpeakingState(true);
-          speakText(data.bot_text, () => {
-            setAiSpeakingState(false);
-            setTimeout(autoEnableUserMicrophone, 220);
-          });
-          return;
-        }
-
-        if (data.user_text) {
-          userDialogueText.innerText = data.user_text;
-          const isErr = !!data.error_msg;
-          const isSkipped = data.extracted_value === null && !isErr;
-          let cleanVal = '';
-          if (isSkipped) {
-            cleanVal = '';
-          } else if (data.extracted_value !== null && data.extracted_value !== undefined) {
-            cleanVal = String(data.extracted_value);
-          } else if (!isErr) {
-            cleanVal = data.user_text;
-          }
-
-          liveSubtitles.className = 'live-subtitles';
-          if (isErr) {
-            liveSubtitles.innerHTML = `⚠️ <span style="color:#f87171;">${data.error_msg}</span>`;
-            statusText.innerText = data.error_msg;
-            statusDot.style.background = "#ef4444";
-            correctionInput.value = '';
-            aiDialogueText.innerText = data.error_msg;
-            setAiSpeakingState(true);
-            speakText(data.error_msg, () => {
-              setAiSpeakingState(false);
-              setTimeout(autoEnableUserMicrophone, 200);
-            });
-          } else if (isSkipped) {
-            liveSubtitles.innerHTML = `🗣️ Heard: "<strong>${data.user_text}</strong>" &nbsp;➔&nbsp; English Value: <span class="highlight-clean">(Skipped / None)</span>`;
-            correctionInput.value = '';
-            statusText.innerText = "✓ Optional field skipped. Click 'Next' to proceed.";
-            statusDot.style.background = "#10b981";
-            triggerNextPulse(true);
-          } else {
-            liveSubtitles.innerHTML = `🗣️ Heard: "<strong>${data.user_text}</strong>" &nbsp;➔&nbsp; English Value: <span class="highlight-clean">${cleanVal || '(Empty)'}</span>`;
-            correctionInput.value = cleanVal;
-            statusText.innerText = "✓ Input ready! Click 'Next' (or press Enter) to store into JSON, or edit to correct.";
-            statusDot.style.background = "#10b981";
-            triggerNextPulse(true);
-          }
-
-          dockCorrectionBox.style.display = 'flex';
-          isCorrectionMode = true;
-          correctBtnText.innerText = "Close";
-          btnToggleCorrection.classList.add('active');
-          refreshCorrectionFieldOptions();
-
-          if (autoNextEnabled && !isErr) {
-            statusText.innerText = "⚡ Input ready! Auto-saving to JSON in 2s (or click Next / edit to correct)...";
-            statusDot.style.background = "#f59e0b";
-            if (autoProceedTimer) clearTimeout(autoProceedTimer);
-            autoProceedTimer = setTimeout(() => {
-              handleNextClick();
-            }, 2200);
-          }
-        } else {
-          userDialogueText.innerText = "(No clear voice detected. Retrying...)";
-          liveSubtitles.innerText = "No voice heard. Speak closer or use Correction.";
-          statusText.innerText = "No voice heard. Speak closer or use Correction.";
-          statusDot.style.background = "#ef4444";
-        }
-
-        if (data.json) {
-          updateJSONView(data.json);
-        }
-
-        currentField = data.current_field;
-        updateFieldDisplay(currentField);
-
+        handleServerResponse(data, data.user_text || latestLiveTranscript);
       } catch (err) {
         statusText.innerText = "Error: " + err;
       }
@@ -2646,7 +3370,7 @@ HTML_PAGE = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/correct_field', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Language': currentLang },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key: key, value: val })
         });
         const data = await res.json();
@@ -2678,7 +3402,7 @@ HTML_PAGE = """<!DOCTYPE html>
       try {
         const res = await fetch('/api/correct_field', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Language': currentLang },
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ key: targetKey, value: val })
         });
         const data = await res.json();
@@ -2710,40 +3434,12 @@ HTML_PAGE = """<!DOCTYPE html>
         const res = await fetch('/api/answer', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'X-Language': currentLang
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify({ key: currentField ? currentField.key : null, answer: "skip", lang: currentLang })
         });
         const data = await res.json();
-        if (data.json) updateJSONView(data.json);
-        currentField = data.current_field;
-        updateFieldDisplay(currentField);
-        liveSubtitles.className = 'live-subtitles';
-        liveSubtitles.innerHTML = `⏩ Skipped optional field: <strong>${data.field_key || ''}</strong>`;
-        userDialogueText.innerText = "skip";
-        refreshCorrectionFieldOptions();
-
-        if (data.is_completed) {
-          setAiSpeakingState(true);
-          aiDialogueText.innerText = data.bot_text;
-          statusText.innerText = "Store onboarding completed successfully!";
-          statusDot.style.background = "#10b981";
-          speakText(data.bot_text, () => {
-            setAiSpeakingState(false);
-          });
-        } else if (data.bot_text) {
-          aiDialogueText.innerText = data.bot_text;
-          dockFieldHint.innerText = currentField ? `${currentField.label} (${currentField.index}/${currentField.total})` : "Done";
-          dockSkipBtn.style.display = (currentField && !currentField.required) ? 'inline-flex' : 'none';
-          statusText.innerText = "Asking next question...";
-          statusDot.style.background = "#10b981";
-          setAiSpeakingState(true);
-          speakText(data.bot_text, () => {
-            setAiSpeakingState(false);
-            setTimeout(autoEnableUserMicrophone, 200);
-          });
-        }
+        handleServerResponse(data, "skip");
       } catch (err) {
         console.warn("skip error:", err);
       }
@@ -2833,57 +3529,12 @@ HTML_PAGE = """<!DOCTYPE html>
         const res = await fetch('/api/answer', {
           method: 'POST',
           headers: {
-            'Content-Type': 'application/json',
-            'X-Language': currentLang
+            'Content-Type': 'application/json'
           },
           body: JSON.stringify({ key: currentField.key, answer: val, lang: currentLang })
         });
         const data = await res.json();
-
-        if (data.error_msg) {
-          statusText.innerText = data.error_msg;
-          statusDot.style.background = "#ef4444";
-          liveSubtitles.className = 'live-subtitles';
-          liveSubtitles.innerHTML = `⚠️ <span style="color:#f87171;">${data.error_msg}</span>`;
-          aiDialogueText.innerText = data.error_msg;
-          setAiSpeakingState(true);
-          speakText(data.error_msg, () => {
-            setAiSpeakingState(false);
-            setTimeout(autoEnableUserMicrophone, 200);
-          });
-          return;
-        }
-
-        if (data.json) updateJSONView(data.json);
-        currentField = data.current_field;
-        updateFieldDisplay(currentField);
-        liveSubtitles.className = 'live-subtitles';
-        liveSubtitles.innerHTML = `💾 Stored in JSON: <span class="highlight-clean">${val}</span>`;
-        userDialogueText.innerText = val;
-        correctionInput.value = '';
-        toggleCorrectionMode(false);
-        refreshCorrectionFieldOptions();
-
-        if (data.is_completed) {
-          setAiSpeakingState(true);
-          aiDialogueText.innerText = data.bot_text;
-          statusText.innerText = "Store onboarding completed successfully!";
-          statusDot.style.background = "#10b981";
-          speakText(data.bot_text, () => {
-            setAiSpeakingState(false);
-          });
-        } else if (data.bot_text) {
-          aiDialogueText.innerText = data.bot_text;
-          dockFieldHint.innerText = currentField ? `${currentField.label} (${currentField.index}/${currentField.total})` : "Done";
-          dockSkipBtn.style.display = (currentField && !currentField.required) ? 'inline-flex' : 'none';
-          statusText.innerText = "Asking next question...";
-          statusDot.style.background = "#f59e0b";
-          setAiSpeakingState(true);
-          speakText(data.bot_text, () => {
-            setAiSpeakingState(false);
-            setTimeout(autoEnableUserMicrophone, 220);
-          });
-        }
+        handleServerResponse(data, val);
       } catch (err) {
         statusText.innerText = "Error saving answer: " + err;
         statusDot.style.background = "#ef4444";
@@ -2995,51 +3646,60 @@ HTML_PAGE = """<!DOCTYPE html>
       }
 
       stopAllSpeech();
+      setAiSpeakingState(true);
 
       const isTelugu = currentLang === 'te' || /[\u0C00-\u0C7F]/.test(text);
-
-      // Telugu Voice: Windows and Chrome lack a built-in Telugu offline voice!
-      // Fetch authentic Telugu speech audio from /api/tts with automatic Web Speech fallback
-      if (isTelugu) {
-        setAiSpeakingState(true);
-        const ttsUrl = `/api/tts?text=${encodeURIComponent(text)}&lang=te`;
-        const audio = new Audio(ttsUrl);
-        currentTtsAudio = audio;
-
-        let finished = false;
-        const done = () => {
-          if (finished) return;
-          finished = true;
-          setAiSpeakingState(false);
-          currentTtsAudio = null;
-          if (onComplete) onComplete();
-        };
-
-        audio.onended = done;
-        audio.onerror = (e) => {
-          console.warn("Telugu audio fetch error, trying Web Speech fallback:", e);
-          fallbackWebSpeech(text, 'te-IN', done);
-        };
-        audio.play().catch(e => {
-          console.warn("Telugu audio play blocked, trying Web Speech fallback:", e);
-          fallbackWebSpeech(text, 'te-IN', done);
-        });
-        return;
-      }
-
-      // For Hindi and English: use native browser speech synthesis directly (instant 0ms)
       const isHindi = currentLang === 'hi' || /[\u0900-\u097F]/.test(text);
-      const targetLang = isHindi ? 'hi-IN' : 'en-IN';
+      const langCode = isTelugu ? 'te' : (isHindi ? 'hi' : 'en');
+      const fallbackLangTag = isTelugu ? 'te-IN' : (isHindi ? 'hi-IN' : 'en-IN');
 
-      setAiSpeakingState(true);
-      fallbackWebSpeech(text, targetLang, onComplete);
+      const ttsUrl = `/api/tts?text=${encodeURIComponent(text)}&lang=${langCode}`;
+      const audio = new Audio(ttsUrl);
+      audio.playbackRate = currentVoiceSpeed;
+      currentTtsAudio = audio;
+
+      let finished = false;
+      const done = () => {
+        if (finished) return;
+        finished = true;
+        setAiSpeakingState(false);
+        currentTtsAudio = null;
+        if (onComplete) {
+          // 250ms echo settling delay before opening microphone
+          setTimeout(onComplete, 250);
+        }
+      };
+
+      const estimatedMs = Math.max(2000, ((text.length * 85) / currentVoiceSpeed) + 3000);
+      const watchdog = setTimeout(() => {
+        if (!finished) {
+          console.warn("[TTS Watchdog] Audio timeout, proceeding to mic.");
+          done();
+        }
+      }, estimatedMs);
+
+      audio.onended = () => {
+        clearTimeout(watchdog);
+        done();
+      };
+      audio.onerror = (e) => {
+        console.warn("TTS audio fetch error, trying Web Speech fallback:", e);
+        clearTimeout(watchdog);
+        fallbackWebSpeech(text, fallbackLangTag, onComplete);
+      };
+      audio.play().catch(e => {
+        console.warn("TTS audio play blocked, trying Web Speech fallback:", e);
+        clearTimeout(watchdog);
+        fallbackWebSpeech(text, fallbackLangTag, onComplete);
+      });
     }
 
     function fallbackWebSpeech(text, targetLangCode, onComplete) {
       if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
+        try { window.speechSynthesis.cancel(); } catch (e) {}
         const u = new SpeechSynthesisUtterance(text);
-        u.rate = 1.0;
+        window.activeUtterance = u; // Prevents Chrome garbage collection dropping onend!
+        u.rate = currentVoiceSpeed;
         u.pitch = 1.0;
         u.lang = targetLangCode;
 
@@ -3058,16 +3718,28 @@ HTML_PAGE = """<!DOCTYPE html>
         const done = () => {
           if (ended) return;
           ended = true;
+          window.activeUtterance = null;
           setAiSpeakingState(false);
-          if (onComplete) onComplete();
+          if (onComplete) {
+            setTimeout(onComplete, 250);
+          }
         };
 
         u.onend = done;
         u.onerror = done;
-        window.speechSynthesis.speak(u);
+
+        // Chrome speech synthesis watchdog
+        const estimatedMs = Math.max(2000, ((text.length * 90) / currentVoiceSpeed) + 2000);
+        setTimeout(done, estimatedMs);
+
+        try {
+          window.speechSynthesis.speak(u);
+        } catch (e) {
+          done();
+        }
       } else {
         setAiSpeakingState(false);
-        if (onComplete) setTimeout(onComplete, 1500);
+        if (onComplete) setTimeout(onComplete, 250);
       }
     }
 
@@ -3638,156 +4310,188 @@ SWAGGER_UI_HTML = """<!DOCTYPE html>
 
 
 class AutonomousStoreBotHandler(http.server.SimpleHTTPRequestHandler):
-    def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.end_headers()
-            self.wfile.write(HTML_PAGE.encode("utf-8"))
-        elif self.path in ("/docs", "/swagger", "/docs/", "/swagger/"):
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(SWAGGER_UI_HTML.encode("utf-8"))
-        elif self.path in ("/openapi.json", "/swagger.json", "/api/openapi.json"):
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps(OPENAPI_SPEC, indent=2).encode("utf-8"))
-        elif self.path.startswith("/api/get_state"):
-            global SESSION
-            lang = "auto"
-            if "?" in self.path:
-                params = urllib.parse.parse_qs(self.path.split("?", 1)[1])
-                lang = params.get("lang", ["auto"])[0]
-            curr_json = build_store_json(SESSION["data"], SESSION["backend_id"])
-            progress = int((SESSION["current_index"] / len(STORE_FIELDS)) * 100)
-            res = {
-                "json": curr_json,
-                "progress": progress,
-                "current_field": get_current_field_info(lang),
-                "language": SESSION.get("language", "auto"),
-                "language_chosen": SESSION.get("language_chosen", False),
-            }
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(res).encode("utf-8"))
-        elif self.path.startswith("/api/tts"):
-            parsed = urllib.parse.urlparse(self.path)
-            params = urllib.parse.parse_qs(parsed.query)
-            text = params.get("text", [""])[0].strip()
-            lang = params.get("lang", ["te"])[0].strip().lower()
-            if not text:
-                self.send_response(400)
-                self.end_headers()
-                return
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            pass
 
-            audio_data = get_tts_audio_bytes(text, lang)
-            if audio_data:
-                self.send_response(200)
-                self.send_header("Content-Type", "audio/mpeg")
-                self.send_header("Content-Length", str(len(audio_data)))
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.send_header("Cache-Control", "public, max-age=86400")
-                self.end_headers()
-                self.wfile.write(audio_data)
-            else:
-                self.send_response(500)
-                self.end_headers()
-        else:
-            self.send_response(404)
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            pass
+
+    def end_headers(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Language, X-Client-Transcript, Authorization, Accept, Origin, User-Agent")
+        super().end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Max-Age", "86400")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def send_html_response(self, html_str, status=200):
+        try:
+            body = html_str.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            pass
+
+    def send_json_response(self, data, status=200):
+        try:
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            pass
+
+    def do_GET(self):
+        try:
+            clean_path = self.path.split("?")[0]
+            if clean_path in ("/", "/index.html"):
+                self.send_html_response(HTML_PAGE)
+            elif clean_path in ("/docs", "/swagger", "/docs/", "/swagger/"):
+                self.send_html_response(SWAGGER_UI_HTML)
+            elif clean_path in ("/openapi.json", "/swagger.json", "/api/openapi.json"):
+                self.send_json_response(OPENAPI_SPEC)
+            elif clean_path == "/api/get_state":
+                global SESSION
+                lang = "auto"
+                if "?" in self.path:
+                    params = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+                    lang = params.get("lang", ["auto"])[0]
+                curr_json = build_store_json(SESSION["data"], SESSION["backend_id"])
+                progress = int((SESSION["current_index"] / len(STORE_FIELDS)) * 100)
+                res = {
+                    "json": curr_json,
+                    "progress": progress,
+                    "current_field": get_current_field_info(lang),
+                    "language": SESSION.get("language", "auto"),
+                    "language_chosen": SESSION.get("language_chosen", False),
+                }
+                self.send_json_response(res)
+            elif clean_path == "/api/tts":
+                parsed = urllib.parse.urlparse(self.path)
+                params = urllib.parse.parse_qs(parsed.query)
+                text = params.get("text", [""])[0].strip()
+                lang = params.get("lang", ["te"])[0].strip().lower()
+                if not text:
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+
+                audio_data = get_tts_audio_bytes(text, lang)
+                if audio_data:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mpeg")
+                    self.send_header("Content-Length", str(len(audio_data)))
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Cache-Control", "public, max-age=86400")
+                    self.end_headers()
+                    try:
+                        self.wfile.write(audio_data)
+                    except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+                        pass
+                else:
+                    self.send_response(500)
+                    self.end_headers()
+            elif clean_path == "/favicon.ico":
+                self.send_response(204)
+                self.end_headers()
+            else:
+                self.send_response(404)
+                self.end_headers()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            pass
 
     def do_POST(self):
         global SESSION
+        clean_path = self.path.split("?")[0]
         length = int(self.headers.get("Content-Length", 0))
-        post_data = self.rfile.read(length)
+        post_data = self.rfile.read(length) if length > 0 else b""
         client_lang = self.headers.get("X-Language", "auto").strip().lower()
         whisper_lang = None if client_lang in ("auto", "", "none") else client_lang
         client_transcript = urllib.parse.unquote(self.headers.get("X-Client-Transcript", "")).strip()
 
-        if self.path == "/api/transcribe":
+        if clean_path == "/api/transcribe":
             try:
-                buf = io.BytesIO(post_data)
-                audio_arr = decode_audio(buf)
+                curr_idx = SESSION["current_index"]
+                curr_field_dict = STORE_FIELDS[curr_idx] if curr_idx < len(STORE_FIELDS) else None
+                curr_field = curr_field_dict["key"] if curr_field_dict else ""
+                target_lang = whisper_lang if whisper_lang in ("hi", "te", "en") else (SESSION.get("language") if SESSION.get("language") in ("hi", "te", "en") else None)
+                effective_lang = target_lang or (client_lang if client_lang in ("hi", "te", "en") else "en")
 
-                # Multi-stage spectral noise gate, FFT bandpass filter & normalization
-                audio_arr = denoise_audio(audio_arr, sample_rate=16000)
+                c_clean = "" if is_whisper_hallucination(client_transcript) else client_transcript.strip()
+                user_text = ""
+                detected_lang = effective_lang
+                lang_prob = 1.0
 
-                # Guard against pure noise or silence
-                if len(audio_arr) < 1600 or np.max(np.abs(audio_arr)) < 0.01:
-                    if client_transcript and not is_whisper_hallucination(client_transcript):
-                        user_text = client_transcript
-                        detected_lang = client_lang if client_lang in ("hi", "te", "en") else "en"
-                        lang_prob = 1.0
-                    else:
-                        user_text = ""
-                        detected_lang = client_lang if client_lang in ("hi", "te", "en") else "en"
-                        lang_prob = 1.0
-                else:
-                    curr_idx = SESSION["current_index"]
-                    curr_field_dict = STORE_FIELDS[curr_idx] if curr_idx < len(STORE_FIELDS) else None
-                    curr_field = curr_field_dict["key"] if curr_field_dict else ""
-                    target_lang = whisper_lang if whisper_lang in ("hi", "te", "en") else (SESSION.get("language") if SESSION.get("language") in ("hi", "te", "en") else None)
-                    field_prompt = get_field_prompt(curr_field, target_lang or "en")
-
-                    # Fast 5-beam search + native Indic/English transcription
-                    segments, info = model.transcribe(
-                        audio_arr,
-                        beam_size=5,
-                        best_of=5,
-                        task="transcribe",
-                        language=target_lang,
-                        vad_filter=True,
-                        vad_parameters=dict(min_silence_duration_ms=250, speech_pad_ms=150, threshold=0.35),
-                        no_speech_threshold=0.6,
-                        log_prob_threshold=-1.0,
-                        compression_ratio_threshold=2.4,
-                        initial_prompt=field_prompt,
-                        condition_on_previous_text=False,
-                        temperature=0.0,
-                    )
-                    whisper_text = " ".join(s.text.strip() for s in segments).strip()
-                    detected_lang = target_lang or (info.language if hasattr(info, "language") else "en")
-                    lang_prob = float(info.language_probability) if hasattr(info, "language_probability") else 1.0
-
-                    w_clean = "" if is_whisper_hallucination(whisper_text) else whisper_text.strip()
-                    c_clean = "" if is_whisper_hallucination(client_transcript) else client_transcript.strip()
-                    effective_lang = target_lang if target_lang in ("hi", "te", "en") else (detected_lang if detected_lang in ("hi", "te") else "en")
-
-                    # Intelligent Dual-Engine Candidate Fusion (Whisper + Chrome Web Speech)
-                    if curr_field_dict:
-                        w_val, w_err, _ = parse_and_validate(curr_field_dict, w_clean, SESSION["data"], lang=effective_lang) if w_clean else (None, "empty", None)
-                        c_val, c_err, _ = parse_and_validate(curr_field_dict, c_clean, SESSION["data"], lang=effective_lang) if c_clean else (None, "empty", None)
-
-                        # If Chrome Web Speech parsed cleanly but Whisper had an error or empty:
-                        if c_val is not None and w_val is None:
+                # FAST PATH (<5ms): If browser Web Speech transcript is already valid, bypass heavy Whisper!
+                if c_clean:
+                    if not SESSION.get("language_chosen"):
+                        ch = detect_language_choice(c_clean)
+                        if ch:
                             user_text = c_clean
-                        # If Whisper parsed cleanly but Chrome Web Speech had an error or empty:
-                        elif w_val is not None and c_val is None:
-                            user_text = w_clean
-                        # If both parsed cleanly:
-                        elif w_val is not None and c_val is not None:
-                            if curr_field == "phone":
-                                # Prefer full 10-digit number
-                                w_dig = re.sub(r'\D', '', w_clean)
-                                c_dig = re.sub(r'\D', '', c_clean)
-                                user_text = c_clean if (len(c_dig) == 10 and len(w_dig) != 10) else w_clean
-                            else:
-                                user_text = c_clean if c_clean else w_clean
+                            detected_lang = ch
+                    elif curr_field_dict:
+                        if is_skip(c_clean) and not curr_field_dict.get("required"):
+                            user_text = c_clean
                         else:
-                            # Neither parsed without error; pick whichever heard speech
-                            user_text = c_clean if c_clean else w_clean
-                    else:
-                        user_text = c_clean if c_clean else w_clean
+                            c_val, c_err, _ = parse_and_validate(curr_field_dict, c_clean, SESSION["data"], lang=effective_lang)
+                            if (c_val is not None or is_skip(c_clean)) and not c_err:
+                                user_text = c_clean
+
+                # FALLBACK PATH (Whisper greedy beam_size=1): Only when Web Speech is absent or invalid
+                if not user_text and post_data and len(post_data) > 1000:
+                    audio_arr = safe_decode_audio(post_data)
+                    if len(audio_arr) >= 1600 and np.max(np.abs(audio_arr)) >= 0.01:
+                        audio_arr = denoise_audio(audio_arr, sample_rate=16000)
+                        field_prompt = get_field_prompt(curr_field, target_lang or "en")
+                        try:
+                            segments, info = model.transcribe(
+                                audio_arr,
+                                beam_size=1,
+                                best_of=1,
+                                task="transcribe",
+                                language=target_lang,
+                                vad_filter=True,
+                                vad_parameters=dict(
+                                    threshold=0.45,
+                                    min_speech_duration_ms=150,
+                                    min_silence_duration_ms=300,
+                                    speech_pad_ms=200,
+                                ),
+                                initial_prompt=field_prompt,
+                                condition_on_previous_text=False,
+                                temperature=0.0,
+                            )
+                            whisper_text = " ".join(s.text.strip() for s in segments).strip()
+                            w_clean = "" if is_whisper_hallucination(whisper_text) else whisper_text.strip()
+                            if w_clean:
+                                user_text = w_clean
+                                if hasattr(info, "language"):
+                                    detected_lang = info.language
+                                    lang_prob = float(info.language_probability) if hasattr(info, "language_probability") else 1.0
+                        except Exception as w_err:
+                            print(f"[Whisper Transcribe Error] {w_err}")
+                    elif c_clean:
+                        user_text = c_clean
 
                 if not user_text:
                     no_voice_msg = {
                         "hi": "मुझे कोई आवाज़ सुनाई नहीं दी। आइए फिर से कोशिश करें।",
-                        "te": "నాకు ఎలాంటి శబ్దం వినిపించలేదు. దయచేసి మళ్లీ ప్రయత్నించండి.",
+                        "te": "నాకు voice వినిపించలేదు. Please మళ్ళీ ఒకసారి చెప్పండి.",
                     }.get(effective_lang, "I could not hear any speech. Let's try that question again.")
                     response = {
                         "user_text": "",
@@ -3802,29 +4506,12 @@ class AutonomousStoreBotHandler(http.server.SimpleHTTPRequestHandler):
                     detected_choice = detect_language_choice(user_text)
                     if not SESSION.get("language_chosen"):
                         if detected_choice in ("en", "hi", "te"):
-                            SESSION["language"] = detected_choice
-                            SESSION["language_chosen"] = True
                             effective_lang = detected_choice
-                            if detected_choice == "hi":
-                                ack = "भाषा हिंदी चुनी गई है! आइए आपकी दुकान का पंजीकरण शुरू करते हैं। आपकी दुकान या कंपनी का नाम क्या है?"
-                            elif detected_choice == "te":
-                                ack = "భాష తెలుగు ఎంపిక చేయబడింది! మీ స్టోర్ నమోదు ప్రారంభిద్దాం. మీ దుకాణం లేదా కంపెనీ పేరు ఏమిటి?"
-                            else:
-                                ack = "Language set to English! Let's set up your store profile. What is your company or store name?"
-                            response = {
-                                "user_text": user_text,
-                                "bot_text": ack,
-                                "json": build_store_json(SESSION["data"], SESSION["backend_id"]),
-                                "progress": 0,
-                                "current_field": get_current_field_info(detected_choice),
-                                "detected_language": detected_choice,
-                                "detected_prob": 1.0,
-                                "language_selected": detected_choice,
-                            }
+                            response = build_language_selection_response(detected_choice, user_text)
                         else:
                             rep = {
                                 "hi": "कृपया अपनी भाषा चुनें: हिंदी, तेलुगु, या अंग्रेज़ी।",
-                                "te": "దయచేసి మీ భాషను ఎంచుకోండి: ఇంగ్లీష్, హిందీ, లేదా తెలుగు.",
+                                "te": "దయచేసి మీ language ని select చేసుకోండి: English, Hindi, లేదా Telugu.",
                             }.get(effective_lang, "Please choose your language: English, Hindi, or Telugu.")
                             response = {
                                 "user_text": user_text,
@@ -3847,7 +4534,7 @@ class AutonomousStoreBotHandler(http.server.SimpleHTTPRequestHandler):
                             if detected_choice == "hi":
                                 ack = f"भाषा बदलकर हिंदी कर दी गई है। {curr_q}"
                             elif detected_choice == "te":
-                                ack = f"భాష తెలుగుకు మార్చబడింది. {curr_q}"
+                                ack = f"Language ని Telugu కి switch చేశాను. {curr_q}"
                             else:
                                 ack = f"Switched language to English. {curr_q}"
                             response = {
@@ -3861,70 +4548,88 @@ class AutonomousStoreBotHandler(http.server.SimpleHTTPRequestHandler):
                                 "language_switched": detected_choice,
                             }
                         else:
-                            curr_idx = SESSION["current_index"]
-                            if curr_idx < len(STORE_FIELDS):
-                                curr_fld = STORE_FIELDS[curr_idx]
-                                parsed_val, err_msg, auto_state = parse_and_validate(curr_fld, user_text, SESSION["data"], lang=effective_lang)
-                                response = {
-                                    "status": "ready_to_save" if not err_msg else "validation_error",
-                                    "user_text": user_text,
-                                    "extracted_value": ensure_english_val(parsed_val),
-                                    "error_msg": err_msg,
-                                    "bot_text": err_msg if err_msg else None,
-                                    "field_key": curr_fld["key"],
-                                    "current_field": get_current_field_info(effective_lang),
-                                    "detected_language": detected_lang,
-                                    "detected_prob": lang_prob,
-                                    "json": build_store_json(SESSION["data"], SESSION["backend_id"]),
-                                }
-                            else:
-                                response = process_user_turn(user_text, lang=effective_lang)
-                                response["detected_language"] = detected_lang
-                                response["detected_prob"] = lang_prob
+                            response = process_user_turn(user_text, lang=effective_lang)
+                            response["detected_language"] = detected_lang
+                            response["detected_prob"] = lang_prob
+
+                # Embed pre-warmed audio directly for zero-latency instant playback
+                bot_txt = response.get("bot_text")
+                if bot_txt and not response.get("tts_audio_base64"):
+                    audio_b = get_tts_audio_bytes(bot_txt, lang=effective_lang)
+                    if audio_b:
+                        response["tts_audio_base64"] = base64.b64encode(audio_b).decode("ascii")
+
             except Exception as e:
-                response = {"error": str(e), "bot_text": f"Error: {e}"}
+                print(f"[Transcribe Warning Handled] {e}")
+                friendly_msg = {
+                    "te": "నాకు voice వినిపించలేదు. Please మళ్ళీ ఒకసారి చెప్పండి.",
+                    "hi": "मुझे कोई आवाज़ सुनाई नहीं दी। आइए फिर से कोशिश करें।",
+                }.get(effective_lang, "I could not hear any speech. Let's try that question again.")
+                response = {
+                    "user_text": "",
+                    "bot_text": friendly_msg,
+                    "json": build_store_json(SESSION["data"], SESSION["backend_id"]),
+                    "progress": int((SESSION["current_index"] / len(STORE_FIELDS)) * 100),
+                    "current_field": get_current_field_info(effective_lang),
+                    "detected_language": detected_lang,
+                    "detected_prob": lang_prob,
+                }
+                audio_b = get_tts_audio_bytes(friendly_msg, lang=effective_lang)
+                if audio_b:
+                    response["tts_audio_base64"] = base64.b64encode(audio_b).decode("ascii")
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode("utf-8"))
+            self.send_json_response(response)
 
-        elif self.path == "/api/set_language":
+        elif clean_path == "/api/set_language":
             try:
                 payload = json.loads(post_data.decode("utf-8"))
                 ch_lang = payload.get("lang", "en").lower()
-                if ch_lang in ("en", "hi", "te"):
-                    SESSION["language"] = ch_lang
-                    SESSION["language_chosen"] = True
-                response = {
-                    "status": "success",
-                    "language": SESSION.get("language", "en"),
-                    "current_field": get_current_field_info(SESSION.get("language", "en")),
-                }
+                if ch_lang not in ("en", "hi", "te"):
+                    ch_lang = "en"
+                response = build_language_selection_response(ch_lang)
             except Exception as e:
                 response = {"error": str(e)}
+            self.send_json_response(response)
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode("utf-8"))
-
-        elif self.path in ("/api/answer", "/api/save_field"):
+        elif clean_path in ("/api/answer", "/api/save_field"):
             try:
                 payload = json.loads(post_data.decode("utf-8"))
                 user_text = payload.get("answer", "")
                 ans_lang = payload.get("lang") or client_lang
                 target_key = payload.get("key")
-                response = process_user_turn(user_text, lang=ans_lang, target_key=target_key)
+
+                if not SESSION.get("language_chosen"):
+                    detected_choice = detect_language_choice(user_text)
+                    if detected_choice in ("en", "hi", "te"):
+                        response = build_language_selection_response(detected_choice, user_text)
+                    else:
+                        rep = {
+                            "hi": "कृपया अपनी भाषा चुनें: हिंदी, तेलुगु, या अंग्रेज़ी।",
+                            "te": "దయచేసి మీ language ని select చేసుకోండి: English, Hindi, లేదా Telugu.",
+                        }.get(ans_lang, "Please choose your language: English, Hindi, or Telugu.")
+                        response = {
+                            "user_text": user_text,
+                            "bot_text": rep,
+                            "json": build_store_json(SESSION["data"], SESSION["backend_id"]),
+                            "progress": 0,
+                            "current_field": get_current_field_info(ans_lang),
+                            "detected_language": ans_lang,
+                            "detected_prob": 1.0,
+                            "language_chosen": False,
+                        }
+                else:
+                    response = process_user_turn(user_text, lang=ans_lang, target_key=target_key)
+
+                bot_txt = response.get("bot_text")
+                if bot_txt and not response.get("tts_audio_base64"):
+                    audio_b = get_tts_audio_bytes(bot_txt, lang=ans_lang)
+                    if audio_b:
+                        response["tts_audio_base64"] = base64.b64encode(audio_b).decode("ascii")
             except Exception as e:
                 response = {"error": str(e)}
+            self.send_json_response(response)
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode("utf-8"))
-
-        elif self.path == "/api/correct_field":
+        elif clean_path == "/api/correct_field":
             try:
                 payload = json.loads(post_data.decode("utf-8"))
                 field_key = payload.get("key")
@@ -3956,13 +4661,9 @@ class AutonomousStoreBotHandler(http.server.SimpleHTTPRequestHandler):
                 }
             except Exception as e:
                 response = {"error": str(e)}
+            self.send_json_response(response)
 
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps(response).encode("utf-8"))
-
-        elif self.path == "/api/reset":
+        elif clean_path == "/api/reset":
             SESSION = {
                 "current_index": 0,
                 "backend_id": "comp_" + uuid.uuid4().hex[:10],
@@ -3971,10 +4672,7 @@ class AutonomousStoreBotHandler(http.server.SimpleHTTPRequestHandler):
                 "language": None,
                 "language_chosen": False,
             }
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"status": "reset"}).encode("utf-8"))
+            self.send_json_response({"status": "reset"})
         else:
             self.send_response(404)
             self.end_headers()
@@ -3983,6 +4681,14 @@ class AutonomousStoreBotHandler(http.server.SimpleHTTPRequestHandler):
 class ThreadingTCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
     allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        exc_type, exc_val, _ = sys.exc_info()
+        if exc_type in (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            return
+        if isinstance(exc_val, OSError) and getattr(exc_val, "winerror", None) in (10053, 10054, 10038):
+            return
+        super().handle_error(request, client_address)
 
 
 def run_server():

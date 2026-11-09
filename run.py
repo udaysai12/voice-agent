@@ -1,3 +1,10 @@
+import os
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "4")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
+
 import argparse
 import sys
 import time
@@ -210,7 +217,14 @@ def main():
 
     print(f"Loading faster-whisper model '{args.model}' on {args.device} ({args.compute_type})...")
     start_load = time.time()
-    model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type)
+    try:
+        model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type, cpu_threads=4)
+    except RuntimeError as _e:
+        if "mkl_malloc" in str(_e).lower() and args.model != "tiny":
+            print(f"[Warning] MKL memory allocation error on '{args.model}'. Falling back to 'tiny'...")
+            model = WhisperModel("tiny", device=args.device, compute_type=args.compute_type, cpu_threads=2)
+        else:
+            raise
     print(f"Model loaded in {time.time() - start_load:.2f} seconds.")
 
     print(f"Transcribing: {args.audio}")

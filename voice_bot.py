@@ -1,3 +1,22 @@
+import os
+try:
+    import site
+    for sp in site.getsitepackages():
+        cublas_dir = os.path.join(sp, "nvidia", "cublas", "bin")
+        if os.path.exists(cublas_dir):
+            try:
+                os.add_dll_directory(cublas_dir)
+            except Exception:
+                pass
+            os.environ["PATH"] = cublas_dir + os.pathsep + os.environ.get("PATH", "")
+except Exception:
+    pass
+os.environ.setdefault("OMP_NUM_THREADS", "4")
+os.environ.setdefault("MKL_NUM_THREADS", "4")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "4")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "4")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "4")
+
 import argparse
 import datetime
 import json
@@ -30,121 +49,147 @@ from nlu_parser import (
 STORE_FIELDS = [
     {
         "key": "companyName",
+        "label": "Company / Store Name",
+        "label_te": "Store లేదా Company Name",
         "question": "What is your company or store name?",
         "question_en": "What is your company or store name?",
         "question_hi": "आपकी दुकान या कंपनी का नाम क्या है?",
-        "question_te": "మీ దుకాణం లేదా కంపెనీ పేరు ఏమిటి?",
+        "question_te": "మీ store లేదా company name ఏంటి?",
         "required": True,
-        "hint": "e.g., Brostide, Fresh Mart, किराना, బట్టల షాప్",
+        "hint": "Store name cheppandi (e.g. Brostide, Fresh Mart, కిరాణా, బట్టల షాప్)",
     },
     {
         "key": "personName",
+        "label": "Contact Person Name",
+        "label_te": "Contact Person Name",
         "question": "Who is the contact person name?",
         "question_en": "Who is the contact person name?",
         "question_hi": "संपर्क व्यक्ति का नाम क्या है?",
-        "question_te": "కాంటాక్ట్ వ్యక్తి పేరు ఏమిటి?",
+        "question_te": "కాంటాక్ట్ person name ఏంటి?",
         "required": True,
-        "hint": "e.g., Rahul Sharma, Uday Kumar, రాహుల్, ఉదయ్",
+        "hint": "Mee name cheppandi (e.g. Uday Kumar, Rahul, ఉదయ్)",
     },
     {
         "key": "phone",
+        "label": "Phone Number",
+        "label_te": "Mobile Number",
         "question": "What is your contact phone number?",
         "question_en": "What is your contact phone number?",
         "question_hi": "आपका मोबाइल या फ़ोन नंबर क्या है?",
-        "question_te": "మీ మొబైల్ లేదా ఫోన్ నంబర్ ఏమిటి?",
+        "question_te": "మీ 10 digits mobile number చెప్పండి.",
         "required": True,
-        "hint": "10-digit mobile number",
+        "hint": "10 digits mobile number (e.g., 9840123456)",
     },
     {
         "key": "email",
+        "label": "Email Address",
+        "label_te": "Email Address",
         "question": "What is your email address?",
         "question_en": "What is your email address?",
         "question_hi": "आपका ईमेल पता क्या है?",
-        "question_te": "మీ ఇమెయిల్ అడ్రస్ ఏమిటి?",
-        "required": True,
-        "hint": "e.g., name@gmail.com",
+        "question_te": "మీ email address ఏంటి? లేకపోతే skip అనండి.",
+        "required": False,
+        "hint": "e.g., store@gmail.com (లేదా skip anali)",
     },
     {
         "key": "storeCategory",
-        "question": "What is your store category? (e.g., Clothing, Grocery, Electronics)",
-        "question_en": "What is your store category? (e.g., Clothing, Grocery, Electronics)",
+        "label": "Store Category",
+        "label_te": "Store Category",
+        "question": "What is your store category?",
+        "question_en": "What is your store category?",
         "question_hi": "आपकी दुकान किस श्रेणी की है? (जैसे कपड़े, किराना, दवा)",
-        "question_te": "మీ స్టోర్ కేటగిరీ ఏమిటి? (ఉదా. బట్టలు, కిరాణా, మందులు)",
+        "question_te": "మీ store category ఏంటి? లైక్ clothing, grocery, medical, electronics?",
         "required": True,
         "is_list": True,
-        "hint": "Clothing, Grocery, Electronics, బట్టలు, किराना",
+        "hint": "Clothing, Grocery, Medical, Electronics, etc.",
     },
     {
         "key": "doorNo",
-        "question": "What is your shop or door number? (or say 'skip')",
-        "question_en": "What is your shop or door number? (or say 'skip')",
+        "label": "Door / Shop Number",
+        "label_te": "Shop లేదా Door Number",
+        "question": "What is your shop or door number? Or say skip.",
+        "question_en": "What is your shop or door number? Or say skip.",
         "question_hi": "आपकी दुकान या मकान का नंबर क्या है? या छोड़ दो बोलें।",
-        "question_te": "మీ షాప్ లేదా డోర్ నంబర్ ఏమిటి? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "మీ shop లేదా door number ఎంత? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "e.g., 1-2-3, Shop 4B",
+        "hint": "e.g., Shop 4B, 1-2-3 (లేదా skip anali)",
     },
     {
         "key": "street",
-        "question": "What street is your store on? (or say 'skip')",
-        "question_en": "What street is your store on? (or say 'skip')",
+        "label": "Street Name",
+        "label_te": "Street లేదా Road Name",
+        "question": "What street is your store on? Or say skip.",
+        "question_en": "What street is your store on? Or say skip.",
         "question_hi": "आपकी दुकान किस गली या रोड पर है? या छोड़ दो बोलें।",
-        "question_te": "మీ దుకాణం ఏ వీధి లేదా రోడ్డులో ఉంది? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "మీ store ఏ street లేదా road లో ఉంది? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "e.g., Main Road, MG Road",
+        "hint": "e.g., Main Road, MG Road, Gandhi Road (లేదా skip anali)",
     },
     {
         "key": "area",
-        "question": "Which area or locality is it located in?",
-        "question_en": "Which area or locality is it located in?",
+        "label": "Area / Locality",
+        "label_te": "Area లేదా Locality",
+        "question": "Which area or locality is it located in? Or say skip.",
+        "question_en": "Which area or locality is it located in? Or say skip.",
         "question_hi": "यह किस इलाके या एरिया में स्थित है? या छोड़ दो बोलें।",
-        "question_te": "ఇది ఏ ప్రాంతం లేదా ఏరియాలో ఉంది? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "మీ store ఏ area లో ఉంది? లైక్ Madhapur, Gajuwaka? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "e.g., Gajuwaka, Madhapur, T Nagar",
+        "hint": "e.g., Gajuwaka, Madhapur, Jubilee Hills (లేదా skip anali)",
     },
     {
         "key": "town",
-        "question": "Which town is it in? (or say 'skip')",
-        "question_en": "Which town is it in? (or say 'skip')",
+        "label": "Town / Village",
+        "label_te": "Town లేదా Village",
+        "question": "Which town is it in? Or say skip.",
+        "question_en": "Which town is it in? Or say skip.",
         "question_hi": "यह किस कस्बे या गाँव में है? या छोड़ दो बोलें।",
-        "question_te": "ఇది ఏ టౌన్ లేదా గ్రామంలో ఉంది? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "మీ town లేదా village name ఏంటి? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "town or village name",
+        "hint": "Town లేదా village name (లేదా skip anali)",
     },
     {
         "key": "city",
+        "label": "City",
+        "label_te": "City Name",
         "question": "Which city is your store in?",
         "question_en": "Which city is your store in?",
         "question_hi": "आपकी दुकान किस शहर में है?",
-        "question_te": "మీ దుకాణం ఏ నగరంలో ఉంది?",
+        "question_te": "మీ store ఏ city లో ఉంది? లైక్ Vizag, Hyderabad?",
         "required": True,
-        "hint": "e.g., Visakhapatnam, Hyderabad, Chennai, విశాఖపట్నం, हैदराबाद",
+        "hint": "Visakhapatnam, Hyderabad, Vijayawada, etc.",
     },
     {
         "key": "state",
-        "question": "Which state are you in?",
-        "question_en": "Which state are you in?",
+        "label": "State",
+        "label_te": "State",
+        "question": "Which state are you located in?",
+        "question_en": "Which state are you located in?",
         "question_hi": "आप किस राज्य में स्थित हैं?",
-        "question_te": "మీరు ఏ రాష్ట్రంలో ఉన్నారు?",
+        "question_te": "ఏ state లో ఉన్నారు? Andhra Pradesh లేదా Telangana?",
         "required": True,
-        "hint": "e.g., Andhra Pradesh, Telangana, ఆంధ్రప్రదేశ్, आंध्र प्रदेश",
+        "hint": "Andhra Pradesh, Telangana, etc.",
     },
     {
         "key": "pincode",
+        "label": "Pincode / Zip Code",
+        "label_te": "Pincode",
         "question": "What is your pincode or zip code?",
         "question_en": "What is your pincode or zip code?",
         "question_hi": "आपका पिन कोड क्या है?",
-        "question_te": "మీ పిన్‌కోడ్ లేదా జిప్ కోడ్ ఏమిటి?",
+        "question_te": "మీ area 6 digits pincode ఎంత?",
         "required": True,
         "hint": "6-digit pincode (e.g., 530016, 500081)",
     },
     {
         "key": "usedReferalCode",
-        "question": "Do you have any referral code? (or say 'skip')",
-        "question_en": "Do you have any referral code? (or say 'skip')",
+        "label": "Referral Code",
+        "label_te": "Referral Code",
+        "question": "Do you have any referral code? Or say skip.",
+        "question_en": "Do you have any referral code? Or say skip.",
         "question_hi": "क्या आपके पास कोई रेफ़रल कोड है? या छोड़ दो बोलें।",
-        "question_te": "మీ వద్ద ఏదైనా రెఫరల్ కోడ్ ఉందా? లేదా స్కిప్ అని చెప్పండి.",
+        "question_te": "దగ్గర ఏదైనా referral code ఉందా? లేకపోతే skip అనండి.",
         "required": False,
-        "hint": "referral code or skip",
+        "hint": "Referral code లేదా skip anali (Optional)",
     },
 ]
 
@@ -208,7 +253,7 @@ def speak_voice(text, lang="auto"):
             from gtts import gTTS
 
             buf = io.BytesIO()
-            tts = gTTS(text=text, lang=target_lang)
+            tts = gTTS(text=text, lang=target_lang, timeout=4.0)
             tts.write_to_fp(buf)
             buf.seek(0)
             container = av.open(buf)
@@ -227,7 +272,7 @@ def speak_voice(text, lang="auto"):
     speak_windows(text)
 
 
-def record_audio(sample_rate=16000, max_seconds=10, silence_break_ms=900):
+def record_audio(sample_rate=16000, max_seconds=12, silence_break_ms=1500):
     """
     Records audio with automatic speech break/pause detection.
     Stops recording automatically when user words complete and a ~900ms pause is detected.
@@ -249,12 +294,17 @@ def record_audio(sample_rate=16000, max_seconds=10, silence_break_ms=900):
             recorded_chunks.append(indata.copy())
             rms = float(np.sqrt(np.mean(indata**2)))
 
-            # Dynamic ambient noise floor calibration on initial chunks
-            if len(recorded_chunks) <= 3:
-                state["noise_floor"] = max(rms * 1.5, 0.005)
+            # Continuous noise floor tracking (rejects fan / AC hum)
+            if len(recorded_chunks) <= 5:
+                state["noise_floor"] = min(state["noise_floor"], rms)
+            else:
+                if rms < state["noise_floor"]:
+                    state["noise_floor"] = state["noise_floor"] * 0.85 + rms * 0.15
+                else:
+                    state["noise_floor"] = state["noise_floor"] * 0.995 + rms * 0.005
 
-            speech_threshold = max(state["noise_floor"] * 2.0, 0.015)
-            silence_threshold = max(state["noise_floor"] * 1.3, 0.008)
+            speech_threshold = max(state["noise_floor"] * 2.2, 0.012)
+            silence_threshold = max(state["noise_floor"] * 1.3, 0.005)
 
             if rms > speech_threshold:
                 state["has_spoken"] = True
@@ -496,7 +546,7 @@ def run_voice_form(model, args):
     if args.language == "hi":
         greeting = "नमस्ते! मैं आपकी दुकान पंजीकरण सहायक हूँ। आइए आपकी दुकान का प्रोफ़ाइल सेट करते हैं।"
     elif args.language == "te":
-        greeting = "నమస్కారం! నేను మీ స్టోర్ నమోదు సహాయకుడిని. మీ స్టోర్ ప్రొఫైల్‌ను సెటప్ చేద్దాం."
+        greeting = "నమస్కారం! నేను మీ store registration assistant ని. మీ store profile ని set up చేద్దాం."
     else:
         greeting = "Hello! I am your store registration assistant. Let's set up your store profile."
 
@@ -546,13 +596,18 @@ def run_voice_form(model, args):
                     task="transcribe",
                     language=whisper_lang,
                     vad_filter=True,
-                    vad_parameters=dict(min_silence_duration_ms=250, speech_pad_ms=150, threshold=0.35),
-                    no_speech_threshold=0.6,
+                    vad_parameters=dict(
+                        threshold=0.45,
+                        min_speech_duration_ms=180,
+                        min_silence_duration_ms=500,
+                        speech_pad_ms=300,
+                    ),
+                    no_speech_threshold=0.55,
                     log_prob_threshold=-1.0,
                     compression_ratio_threshold=2.4,
                     initial_prompt=field_prompt,
                     condition_on_previous_text=False,
-                    temperature=0.0,
+                    temperature=[0.0, 0.2],
                 )
                 user_text = " ".join(s.text.strip() for s in segments).strip()
                 if whisper_lang is None and hasattr(info, 'language'):
@@ -589,14 +644,25 @@ def run_voice_form(model, args):
             collected_data["state"] = auto_state
 
         current_idx += 1
-        ack = f"Got it. Saved {key}: {parsed_val}"
+        lbl = field.get("label_te", field.get("label", key))
+        if args.language == "te":
+            ack = f"Okay, {lbl} save అయ్యింది."
+        elif args.language == "hi":
+            ack = f"ठीक है, {key} दर्ज हुआ।"
+        else:
+            ack = f"Got it. Saved {key}: {parsed_val}"
         print(f"They told: {ack}")
 
     # Complete!
     backend_id = "comp_" + uuid.uuid4().hex[:10]
     final_json = build_final_json(collected_data, backend_id=backend_id)
 
-    completion_msg = "Awesome! All fields have been collected. Here is your complete store profile JSON payload:"
+    if args.language == "te":
+        completion_msg = "Congratulations! మీ store details అన్నీ successfully save అయ్యాయి. మీ store profile JSON ready:"
+    elif args.language == "hi":
+        completion_msg = "बधाई हो! आपकी दुकान के सभी विवरण सफलतापूर्वक एकत्र कर लिए गए हैं:"
+    else:
+        completion_msg = "Awesome! All fields have been collected. Here is your complete store profile JSON payload:"
     print("\n" + "=" * 65)
     print(f"They told: {completion_msg}")
     print("=" * 65)
@@ -640,7 +706,14 @@ def main():
     args = parser.parse_args()
 
     print(f"Loading Faster-Whisper '{args.model}' on {args.device} ({args.compute_type})...")
-    model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type)
+    try:
+        model = WhisperModel(args.model, device=args.device, compute_type=args.compute_type, cpu_threads=4)
+    except RuntimeError as _e:
+        if "mkl_malloc" in str(_e).lower() and args.model != "tiny":
+            print(f"[Warning] MKL memory allocation error on '{args.model}'. Falling back to 'tiny'...")
+            model = WhisperModel("tiny", device=args.device, compute_type=args.compute_type, cpu_threads=2)
+        else:
+            raise
 
     if args.demo:
         print("\n--- Running Conversational Speech Simulation ---")

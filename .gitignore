@@ -16,3 +16,5 @@ venv/
 
 *.egg-info/
 scratch/
+
+tts_cache/
